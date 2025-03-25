@@ -1,8 +1,23 @@
 {
   "dependencies": {
+    "@types/axios": "^0.14.4",
+    "@types/express": "^5.0.1",
     "@types/jira-client": "^7.1.9",
+    "axios": "^1.8.4",
+    "cli-table3": "^0.6.5",
     "date-fns": "^4.1.0",
+    "dotenv": "^16.4.7",
+    "ejs": "^3.1.10",
+    "express": "^4.21.2",
+    "google-auth-library": "^9.15.1",
     "googleapis": "^148.0.0",
     "jira-client": "^8.2.2"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "scripts": {
+    "start": "ts-node src/server.ts"
   }
 }

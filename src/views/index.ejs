@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jira Issues Overzicht</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Actieve Jira Issues</h1>
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Issue Key</th>
+                        <th>Samenvatting</th>
+                        <th>Status</th>
+                        <th>Toegewezen aan</th>
+                        <th>Points</th>
+                        <th>Orig. Tijd</th>
+                        <th>Rest. Tijd</th>
+                        <th>Parent</th>
+                        <th>Predecessor</th>
+                        <th>Successor</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <% issues.forEach(issue => { %>
+                        <tr>
+                            <td><%= issue.key %></td>
+                            <td><%= issue.fields.summary %></td>
+                            <td><%= issue.fields.status.name %></td>
+                            <td><%= issue.fields.assignee ? issue.fields.assignee.displayName : 'Niet toegewezen' %></td>
+                            <td><%= issue.fields.customfield_10002 || '-' %></td>
+                            <td><%= issue.fields.timeoriginalestimate ? formatTime(issue.fields.timeoriginalestimate) : '-' %></td>
+                            <td><%= issue.fields.timeestimate ? formatTime(issue.fields.timeestimate) : '-' %></td>
+                            <td><%= issue.fields.parent ? issue.fields.parent.fields.summary : '-' %></td>
+                            <td>
+                                <% 
+                                const predecessors = issue.fields.issuelinks?.filter(link => 
+                                    link.type.outward === 'is predecessor of' || link.type.inward === 'has as a predecessor'
+                                ).map(link => {
+                                    if (link.type.outward === 'is predecessor of') {
+                                        return link.outwardIssue?.key;
+                                    } else {
+                                        return link.inwardIssue?.key;
+                                    }
+                                }).join(', ') || '-';
+                                %>
+                                <%= predecessors %>
+                            </td>
+                            <td>
+                                <% 
+                                const successors = issue.fields.issuelinks?.filter(link => 
+                                    link.type.inward === 'has as a predecessor'
+                                ).map(link => link.inwardIssue?.key).join(', ') || '-';
+                                %>
+                                <%= successors %>
+                            </td>
+                        </tr>
+                    <% }); %>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html> 
