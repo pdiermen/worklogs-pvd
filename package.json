@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "@types/jira-client": "^7.1.9",
+    "date-fns": "^4.1.0",
+    "googleapis": "^148.0.0",
+    "jira-client": "^8.2.2"
+  }
+}
