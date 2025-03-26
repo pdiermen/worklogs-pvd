@@ -98,17 +98,34 @@ export async function getActiveIssues(): Promise<Issue[]> {
             hasToken: !!JIRA_API_TOKEN
         });
         
-        const response = await jiraClient.get('/search', {
-            params: {
-                jql: 'project = EET AND status != Done AND status != "Ready for testing" ORDER BY priority DESC',
-                fields: 'summary,status,assignee,timeestimate,timeoriginalestimate,priority,parent,issuelinks',
-                expand: 'names,schema',
-                maxResults: 1000
-            }
-        });
+        let allIssues: Issue[] = [];
+        let startAt = 0;
+        const maxResults = 100;
+        let hasMore = true;
+
+        while (hasMore) {
+            const response = await jiraClient.get('/search', {
+                params: {
+                    jql: 'project = EET AND status IN (Registered, Open, Reopened, Waiting, "In review") AND issuetype != Epic ORDER BY priority DESC',
+                    fields: 'summary,status,assignee,timeestimate,timeoriginalestimate,priority,parent,issuelinks,issuetype',
+                    expand: 'names,schema',
+                    maxResults: maxResults,
+                    startAt: startAt
+                }
+            });
+
+            const issues = response.data.issues || [];
+            allIssues = allIssues.concat(issues);
+            
+            console.log(`Pagina ${Math.floor(startAt / maxResults) + 1}: ${issues.length} issues gevonden`);
+            
+            // Check of er meer pagina's zijn
+            hasMore = issues.length === maxResults;
+            startAt += maxResults;
+        }
         
-        console.log('Aantal issues gevonden:', response.data.issues?.length || 0);
-        return response.data.issues;
+        console.log('Totaal aantal issues gevonden:', allIssues.length);
+        return allIssues;
     } catch (error: any) {
         console.error('Error fetching issues:', {
             message: error.message,

@@ -29,6 +29,9 @@ export interface Issue {
             };
         };
         successors?: string[];
+        issuetype: {
+            name: string;
+        };
     };
 }
 
