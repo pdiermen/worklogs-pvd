@@ -91,6 +91,13 @@ export function formatTime(seconds: number | undefined): string {
 
 export async function getActiveIssues(): Promise<Issue[]> {
     try {
+        console.log('Start ophalen van Jira issues...');
+        console.log('Jira configuratie:', {
+            domain: JIRA_DOMAIN,
+            email: JIRA_EMAIL,
+            hasToken: !!JIRA_API_TOKEN
+        });
+        
         const response = await jiraClient.get('/search', {
             params: {
                 jql: 'project = EET AND status != Done AND status != "Ready for testing" ORDER BY priority DESC',
@@ -99,9 +106,15 @@ export async function getActiveIssues(): Promise<Issue[]> {
                 maxResults: 50
             }
         });
+        
+        console.log('Aantal issues gevonden:', response.data.issues?.length || 0);
         return response.data.issues;
-    } catch (error) {
-        console.error('Error fetching issues:', error);
+    } catch (error: any) {
+        console.error('Error fetching issues:', {
+            message: error.message,
+            response: error.response?.data,
+            status: error.response?.status
+        });
         return [];
     }
 }
