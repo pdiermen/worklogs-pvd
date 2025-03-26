@@ -216,13 +216,13 @@ app.get('/', async (req, res) => {
         
         // Bereken planning met sprints voor beide projecten
         console.log('Bereken planning...');
-        const subscriptionPlanning = getPlanning(subscriptionIssues, googleSheetsData);
-        const atlantisPlanning = getPlanning(atlantisIssues, googleSheetsData, true);
+        const subscriptionPlanning = getPlanning(subscriptionIssues, googleSheetsData, 'subscription');
+        const atlantisPlanning = getPlanning(atlantisIssues, googleSheetsData, 'atlantis');
         
         // Bereken uren per sprint voor beide projecten
         console.log('Bereken uren per sprint...');
-        const subscriptionSprintHours = getSprintHours(subscriptionPlanning);
-        const atlantisSprintHours = getSprintHours(atlantisPlanning, true);
+        const subscriptionSprintHours = getSprintHours(subscriptionPlanning, 'subscription');
+        const atlantisSprintHours = getSprintHours(atlantisPlanning, 'atlantis');
 
         console.log('Start genereren HTML...');
         // Stuur de volledige HTML
@@ -252,9 +252,33 @@ app.get('/', async (req, res) => {
                     <p>Google Sheets data aanwezig: ${googleSheetsData ? 'Ja' : 'Nee'}</p>
                 </div>
                 
-                <div class="nav-link">
-                    <a href="/worklogs">Bekijk Work Logging</a>
-                </div>
+                ${googleSheetsData ? `
+                <h2>Medewerkers</h2>
+                <table>
+                    <tr>
+                        <th>Organisatie</th>
+                        <th>ID</th>
+                        <th>Naam</th>
+                        <th>Beschikbare uren</th>
+                        <th>Overhead</th>
+                        <th>Efficiëntie</th>
+                        <th>Effectieve uren</th>
+                        <th>Project</th>
+                    </tr>
+                    ${googleSheetsData.slice(1).map(row => `
+                        <tr>
+                            <td>${row[0] || '-'}</td>
+                            <td>${row[1] || '-'}</td>
+                            <td>${row[2] || '-'}</td>
+                            <td>${row[3] || '-'}</td>
+                            <td>${row[4] || '-'}</td>
+                            <td>${row[5] || '-'}</td>
+                            <td>${row[6] || '-'}</td>
+                            <td>${row[7] || '-'}</td>
+                        </tr>
+                    `).join('')}
+                </table>
+                ` : ''}
                 
                 <h2>Alle Issues</h2>
                 <table>
@@ -283,44 +307,7 @@ app.get('/', async (req, res) => {
                         </tr>
                     `).join('')}
                 </table>
-                <h2>Planning Subscriptions</h2>
-                <p>Volgorde van uitvoering (rekening houdend met voorgangers, prioriteit en beschikbare uren):</p>
-                <table>
-                    <tr>
-                        <th>Sprint</th>
-                        <th>Issue</th>
-                        <th>Omschrijving</th>
-                        <th>Prioriteit</th>
-                        <th>Status</th>
-                        <th>Toegewezen aan</th>
-                        <th>Opvolgers</th>
-                        <th>Remaining (uren)</th>
-                    </tr>
-                    ${subscriptionPlanning
-                        .sort((a, b) => {
-                            if (a.sprint !== b.sprint) return a.sprint - b.sprint;
-                            const successorsA = getSuccessors(a.issue).length;
-                            const successorsB = getSuccessors(b.issue).length;
-                            if (successorsA !== successorsB) return successorsB - successorsA;
-                            const priorityOrder = ['Highest', 'High', 'Medium', 'Low'];
-                            const priorityA = priorityOrder.indexOf(a.issue.fields.priority.name);
-                            const priorityB = priorityOrder.indexOf(b.issue.fields.priority.name);
-                            if (priorityA !== priorityB) return priorityA - priorityB;
-                            return a.issue.key.localeCompare(b.issue.key);
-                        })
-                        .map(({ issue, sprint }) => `
-                        <tr>
-                            <td>${sprint}</td>
-                            <td>${issue.key}</td>
-                            <td>${issue.fields.summary}</td>
-                            <td>${issue.fields.priority.name}</td>
-                            <td>${issue.fields.status.name}</td>
-                            <td>${issue.fields.assignee?.displayName || '-'}</td>
-                            <td>${getSuccessors(issue).join(', ') || '-'}</td>
-                            <td>${formatTime(issue.fields.timeestimate)}</td>
-                        </tr>
-                    `).join('')}
-                </table>
+
                 <h2>Planning Atlantis 7</h2>
                 <p>Volgorde van uitvoering (rekening houdend met voorgangers, prioriteit en beschikbare uren):</p>
                 <table>
@@ -359,31 +346,7 @@ app.get('/', async (req, res) => {
                         </tr>
                     `).join('')}
                 </table>
-                <h2>Uren per Sprint Subscriptions</h2>
-                <table>
-                    <tr>
-                        <th>Sprint</th>
-                        <th>Persoon</th>
-                        <th>Uren</th>
-                        <th>Uren beschikbaar</th>
-                        <th>Uren over</th>
-                    </tr>
-                    ${subscriptionSprintHours.map(({ sprint, person, hours }) => {
-                        const employeeHours = googleSheetsData ? parseFloat(googleSheetsData.slice(1).find(row => row[2] === person)?.[6] || '0') : 0;
-                        const sprintCapacity = employeeHours * 2;
-                        const atlantisHours = atlantisSprintHours.find(h => h.sprint === sprint && h.person === person)?.hours || 0;
-                        const availableHours = Math.max(0, sprintCapacity - atlantisHours);
-                        const remainingHours = Math.max(0, availableHours - hours);
-                        return `
-                        <tr>
-                            <td>${sprint}</td>
-                            <td>${person}</td>
-                            <td>${hours.toFixed(1)}</td>
-                            <td>${availableHours.toFixed(1)}</td>
-                            <td>${remainingHours.toFixed(1)}</td>
-                        </tr>
-                    `}).join('')}
-                </table>
+
                 <h2>Uren per Sprint Atlantis 7</h2>
                 <table>
                     <tr>
@@ -409,6 +372,83 @@ app.get('/', async (req, res) => {
                         </tr>
                     `}).join('')}
                 </table>
+
+                <h2>Uren per Sprint Subscriptions</h2>
+                <table>
+                    <tr>
+                        <th>Sprint</th>
+                        <th>Persoon</th>
+                        <th>Uren</th>
+                        <th>Uren beschikbaar</th>
+                        <th>Uren over</th>
+                    </tr>
+                    ${subscriptionSprintHours.map(({ sprint, person, hours }) => {
+                        const employeeHours = googleSheetsData ? parseFloat(googleSheetsData.slice(1).find(row => row[2] === person)?.[6] || '0') : 0;
+                        const sprintCapacity = employeeHours * 2;
+                        const atlantisHours = atlantisSprintHours.find(h => h.sprint === sprint && h.person === person)?.hours || 0;
+                        const availableHours = Math.max(0, sprintCapacity - atlantisHours);
+                        const remainingHours = Math.max(0, availableHours - hours);
+                        return `
+                        <tr>
+                            <td>${sprint}</td>
+                            <td>${person}</td>
+                            <td>${hours.toFixed(1)}</td>
+                            <td>${availableHours.toFixed(1)}</td>
+                            <td>${remainingHours.toFixed(1)}</td>
+                        </tr>
+                    `}).join('')}
+                </table>
+
+                <h2>Totaal uren per Sprint Atlantis 7</h2>
+                <table>
+                    <tr>
+                        <th>Sprint</th>
+                        <th>Totaal beschikbare uren</th>
+                        <th>Totaal ingeplande uren</th>
+                        <th>Uren over</th>
+                    </tr>
+                    ${Array.from({ length: 10 }, (_, i) => i + 1).map(sprint => {
+                        const totalAvailableHours = getAvailableHoursForProject(googleSheetsData, 'Atlantis 7');
+                        const atlantisHours = atlantisSprintHours
+                            .filter(h => h.sprint === sprint)
+                            .reduce((sum, h) => sum + h.hours, 0);
+                        const remainingHours = Math.max(0, totalAvailableHours - atlantisHours);
+
+                        return `
+                        <tr>
+                            <td>${sprint}</td>
+                            <td>${totalAvailableHours.toFixed(1)}</td>
+                            <td>${atlantisHours.toFixed(1)}</td>
+                            <td>${remainingHours.toFixed(1)}</td>
+                        </tr>
+                    `}).join('')}
+                </table>
+
+                <h2>Totaal uren per Sprint Subscriptions</h2>
+                <table>
+                    <tr>
+                        <th>Sprint</th>
+                        <th>Totaal beschikbare uren</th>
+                        <th>Totaal ingeplande uren</th>
+                        <th>Uren over</th>
+                    </tr>
+                    ${Array.from({ length: 10 }, (_, i) => i + 1).map(sprint => {
+                        const totalAvailableHours = getAvailableHoursForProject(googleSheetsData, 'Subscriptions');
+                        const subscriptionHours = subscriptionSprintHours
+                            .filter(h => h.sprint === sprint)
+                            .reduce((sum, h) => sum + h.hours, 0);
+                        const remainingHours = Math.max(0, totalAvailableHours - subscriptionHours);
+
+                        return `
+                        <tr>
+                            <td>${sprint}</td>
+                            <td>${totalAvailableHours.toFixed(1)}</td>
+                            <td>${subscriptionHours.toFixed(1)}</td>
+                            <td>${remainingHours.toFixed(1)}</td>
+                        </tr>
+                    `}).join('')}
+                </table>
+
                 <h2>Overzicht per persoon</h2>
                 <table>
                     <tr>
@@ -424,33 +464,10 @@ app.get('/', async (req, res) => {
                         </tr>
                     `).join('')}
                 </table>
-                ${googleSheetsData ? `
-                <h2>Medewerkers</h2>
-                <table>
-                    <tr>
-                        <th>Organisatie</th>
-                        <th>ID</th>
-                        <th>Naam</th>
-                        <th>Beschikbare uren</th>
-                        <th>Overhead</th>
-                        <th>Efficiëntie</th>
-                        <th>Effectieve uren</th>
-                        <th>Vrije dagen</th>
-                    </tr>
-                    ${googleSheetsData.slice(1).map(row => `
-                        <tr>
-                            <td>${row[0] || '-'}</td>
-                            <td>${row[1] || '-'}</td>
-                            <td>${row[2] || '-'}</td>
-                            <td>${row[3] || '-'}</td>
-                            <td>${row[4] || '-'}</td>
-                            <td>${row[5] || '-'}</td>
-                            <td>${row[6] || '-'}</td>
-                            <td>${row[7] || '-'}</td>
-                        </tr>
-                    `).join('')}
-                </table>
-                ` : ''}
+
+                <div class="nav-link">
+                    <a href="/worklogs">Bekijk Work Logging</a>
+                </div>
             </body>
             </html>
         `;
@@ -492,25 +509,40 @@ function formatTime(seconds: number | undefined): string {
     return hours;
 }
 
-function getPlanning(issues: Issue[], googleSheetsData: string[][] | null, isAtlantis: boolean = false): { issue: Issue; sprint: number }[] {
-    console.log('Start getPlanning functie...');
+function getPlanning(issues: Issue[], googleSheetsData: string[][] | null, projectType: 'atlantis' | 'subscription'): { issue: Issue; sprint: number }[] {
+    console.log(`Start getPlanning functie voor project ${projectType}...`);
     
-    // Maak een map van effectieve uren per medewerker
-    const employeeHoursMap = new Map<string, number>();
+    // Maak een map van effectieve uren en projecten per medewerker
+    const employeeDataMap = new Map<string, { hours: number; projects: string[] }>();
     if (googleSheetsData) {
         googleSheetsData.slice(1).forEach(row => {
             const name = row[2]; // Naam is in kolom C
             const effectiveHours = parseFloat(row[6]) || 0; // Effectieve uren is in kolom G
-            employeeHoursMap.set(name, effectiveHours);
-            console.log(`Medewerker ${name} heeft ${effectiveHours} effectieve uren per week`);
+            const projects = (row[7] || '').split(',').map(p => p.trim()); // Projecten zijn in kolom H
+            employeeDataMap.set(name, { hours: effectiveHours, projects });
+            console.log(`Medewerker ${name} heeft ${effectiveHours} effectieve uren per week en werkt op projecten: ${projects.join(', ')}`);
         });
     }
+
+    // Filter issues op basis van projecten waar medewerkers op werken
+    const filteredIssues = issues.filter(issue => {
+        const assignee = issue.fields.assignee?.displayName;
+        if (!assignee) return false;
+        
+        const employeeData = employeeDataMap.get(assignee);
+        if (!employeeData) return false;
+
+        // Controleer of de medewerker op het juiste project werkt
+        return employeeData.projects.includes(projectType === 'atlantis' ? 'Atlantis 7' : 'Subscriptions');
+    });
+
+    console.log(`Aantal gefilterde issues voor ${projectType}: ${filteredIssues.length}`);
 
     // Sorteer issues op prioriteit (Highest -> High -> Medium -> Low)
     const priorityOrder = ['Highest', 'High', 'Medium', 'Low'];
     
     // Bereid issues voor met prioriteit en opvolgers
-    const issuesWithPriority = issues.map(issue => ({
+    const issuesWithPriority = filteredIssues.map(issue => ({
         issue,
         priority: priorityOrder.indexOf(issue.fields.priority.name),
         hasSuccessors: getSuccessors(issue).length > 0,
@@ -518,7 +550,7 @@ function getPlanning(issues: Issue[], googleSheetsData: string[][] | null, isAtl
         isActive: issue.fields.status.name === 'Open' || issue.fields.status.name === 'In review',
         isWaiting: issue.fields.status.name === 'Waiting',
         predecessors: getPredecessors(issue),
-        isPeterIssue: issue.fields.assignee?.displayName === 'Peter van der Meer'
+        isPeterIssue: issue.fields.assignee?.displayName === 'Peter van Diermen'
     }));
 
     console.log(`Aantal issues om te plannen: ${issuesWithPriority.length}`);
@@ -539,22 +571,16 @@ function getPlanning(issues: Issue[], googleSheetsData: string[][] | null, isAtl
     const sprintHours = new Map<number, Map<string, number>>(); // sprint -> medewerker -> uren
     const maxSprints = 10; // Maximum aantal sprints om te voorkomen dat we oneindig doorlopen
 
-    // Bepaal het project type
-    const projectType = isAtlantis ? 'atlantis' : 'subscription';
-    console.log(`Planning voor project: ${projectType}`);
-
     // Initialiseer de eerste sprint
     sprintHours.set(1, new Map<string, number>());
 
     // Maak een map van issue keys naar hun sprint nummers
     const issueSprintMap = new Map<string, number>();
 
-    // Eerst plannen we alle niet-Peter issues
+    // Eerst plannen we alle issues (inclusief Peter's issues)
     for (const { issue, hours, isActive, isWaiting, predecessors, isPeterIssue } of issuesWithPriority) {
-        if (isPeterIssue) continue; // Sla Peter's issues over voor nu
-
         const assignee = issue.fields.assignee?.displayName || 'Niet toegewezen';
-        const employeeHours = employeeHoursMap.get(assignee) || 0;
+        const employeeHours = employeeDataMap.get(assignee)?.hours || 0;
         const sprintCapacity = employeeHours * 2; // 2 weken per sprint
 
         console.log(`\nBezig met plannen van issue ${issue.key} (${hours} uren) voor ${assignee} - Status: ${issue.fields.status.name}`);
@@ -621,50 +647,43 @@ function getPlanning(issues: Issue[], googleSheetsData: string[][] | null, isAtl
         console.log(`Issue ${issue.key} toegewezen aan sprint ${assignedSprint}`);
     }
 
-    // Nu plannen we Peter's issues in de overgebleven uren
-    for (const { issue, hours, isActive, isWaiting, predecessors, isPeterIssue } of issuesWithPriority) {
-        if (!isPeterIssue) continue; // Alleen Peter's issues
+    // Herverdeel Peter's issues over de beschikbare uren
+    console.log('\nStart herverdelen van Peter\'s issues...');
+    const peterIssues = sprintPlanning.filter(({ issue, sprint }) => 
+        issue.fields.assignee?.displayName === 'Peter van Diermen'
+    );
+    
+    console.log(`Aantal Peter's issues om te herverdelen: ${peterIssues.length}`);
+    
+    for (const { issue, sprint } of peterIssues) {
+        const hours = (issue.fields.timeestimate || 0) / 3600;
+        console.log(`\nBezig met herverdelen van Peter's issue ${issue.key} (${hours} uren)`);
 
-        console.log(`\nBezig met plannen van Peter's issue ${issue.key} (${hours} uren)`);
-
-        // Zoek de eerste sprint waar deze issue past
-        let assignedSprint = 1;
+        // Zoek een sprint met voldoende beschikbare uren
         let foundSprint = false;
-
-        // Als het issue "Waiting" is, zoek de hoogste sprint van de voorgangers
-        if (isWaiting && predecessors.length > 0) {
-            const predecessorSprints = predecessors
-                .map(predKey => issueSprintMap.get(predKey))
-                .filter(sprint => sprint !== undefined);
-            
-            if (predecessorSprints.length > 0) {
-                assignedSprint = Math.max(...predecessorSprints) + 1;
-                console.log(`Issue ${issue.key} is Waiting en wordt gepland in sprint ${assignedSprint} (na voorgangers)`);
-            }
-        }
-
-        // Controleer alle sprints voor beschikbare uren
-        while (assignedSprint <= maxSprints) {
-            const sprintEmployeeHours = sprintHours.get(assignedSprint) || new Map<string, number>();
+        for (let targetSprint = 1; targetSprint <= maxSprints; targetSprint++) {
+            const sprintEmployeeHours = sprintHours.get(targetSprint) || new Map<string, number>();
             let totalAvailableHours = 0;
 
             // Bereken totale beschikbare uren in deze sprint
-            for (const [assignee, employeeHours] of employeeHoursMap.entries()) {
-                if (assignee === 'Peter van der Meer') continue; // Sla Peter over
-                const sprintCapacity = employeeHours * 2;
+            for (const [assignee, employeeData] of employeeDataMap.entries()) {
+                if (assignee === 'Peter van Diermen') continue;
+                const sprintCapacity = employeeData.hours * 2;
                 const usedHours = sprintEmployeeHours.get(assignee) || 0;
-                totalAvailableHours += sprintCapacity - usedHours;
+                const availableHours = sprintCapacity - usedHours;
+                totalAvailableHours += availableHours;
+                console.log(`Sprint ${targetSprint}: ${assignee} heeft ${availableHours} uren beschikbaar (${usedHours} gebruikt van ${sprintCapacity})`);
             }
 
-            console.log(`Sprint ${assignedSprint}: ${totalAvailableHours} uren beschikbaar in totaal`);
+            console.log(`Sprint ${targetSprint}: ${totalAvailableHours} uren beschikbaar in totaal voor issue ${issue.key} (${hours} uren nodig)`);
 
-            // Als er genoeg uren beschikbaar zijn, plaats het issue daar
+            // Als er genoeg uren beschikbaar zijn, verplaats het issue
             if (totalAvailableHours >= hours) {
                 // Verdeel de uren over de beschikbare medewerkers
                 let remainingHours = hours;
-                for (const [assignee, employeeHours] of employeeHoursMap.entries()) {
-                    if (assignee === 'Peter van der Meer') continue; // Sla Peter over
-                    const sprintCapacity = employeeHours * 2;
+                for (const [assignee, employeeData] of employeeDataMap.entries()) {
+                    if (assignee === 'Peter van Diermen') continue;
+                    const sprintCapacity = employeeData.hours * 2;
                     const usedHours = sprintEmployeeHours.get(assignee) || 0;
                     const availableHours = sprintCapacity - usedHours;
 
@@ -672,26 +691,27 @@ function getPlanning(issues: Issue[], googleSheetsData: string[][] | null, isAtl
                         const hoursToAssign = Math.min(remainingHours, availableHours);
                         sprintEmployeeHours.set(assignee, usedHours + hoursToAssign);
                         remainingHours -= hoursToAssign;
+                        console.log(`Toegewezen ${hoursToAssign} uren aan ${assignee} in sprint ${targetSprint} (${remainingHours} uren over)`);
                     }
                 }
 
-                sprintHours.set(assignedSprint, sprintEmployeeHours);
-                foundSprint = true;
-                break;
+                sprintHours.set(targetSprint, sprintEmployeeHours);
+                
+                // Update de planning
+                const planningIndex = sprintPlanning.findIndex(p => p.issue.key === issue.key);
+                if (planningIndex !== -1) {
+                    sprintPlanning[planningIndex].sprint = targetSprint;
+                    issueSprintMap.set(issue.key, targetSprint);
+                    console.log(`Peter's issue ${issue.key} verplaatst naar sprint ${targetSprint}`);
+                    foundSprint = true;
+                    break;
+                }
             }
-
-            assignedSprint++;
         }
 
         if (!foundSprint) {
-            console.log(`WAARSCHUWING: Peter's issue ${issue.key} past niet binnen ${maxSprints} sprints`);
-            // Toewijzen aan laatste sprint als fallback
-            assignedSprint = maxSprints;
+            console.log(`WAARSCHUWING: Kon Peter's issue ${issue.key} niet herverdelen over de sprints`);
         }
-
-        sprintPlanning.push({ issue, sprint: assignedSprint });
-        issueSprintMap.set(issue.key, assignedSprint);
-        console.log(`Peter's issue ${issue.key} toegewezen aan sprint ${assignedSprint}`);
     }
 
     console.log('Planning voltooid');
@@ -731,7 +751,7 @@ function getPersonStats(issues: Issue[]): { name: string; issueCount: number; to
     }));
 }
 
-function getSprintHours(sprintPlanning: { issue: Issue; sprint: number }[], isAtlantis: boolean = false): { sprint: number; person: string; hours: number }[] {
+function getSprintHours(sprintPlanning: { issue: Issue; sprint: number }[], projectType: 'atlantis' | 'subscription'): { sprint: number; person: string; hours: number }[] {
     const sprintHoursMap = new Map<number, Map<string, number>>();
     
     sprintPlanning.forEach(({ issue, sprint }) => {
@@ -755,6 +775,18 @@ function getSprintHours(sprintPlanning: { issue: Issue; sprint: number }[], isAt
         if (a.sprint !== b.sprint) return a.sprint - b.sprint;
         return a.person.localeCompare(b.person);
     });
+}
+
+function getAvailableHoursForProject(googleSheetsData: string[][] | null, projectName: string): number {
+    if (!googleSheetsData) return 0;
+    return googleSheetsData.slice(1).reduce((sum, row) => {
+        const projects = (row[7] || '').split(',').map(p => p.trim());
+        if (projects.includes(projectName)) {
+            const effectiveHours = parseFloat(row[6]) || 0;
+            return sum + (effectiveHours * 2); // 2 weken per sprint
+        }
+        return sum;
+    }, 0);
 }
 
 app.listen(port, () => {
