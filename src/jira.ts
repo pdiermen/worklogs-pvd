@@ -102,7 +102,8 @@ export async function getActiveIssues(): Promise<Issue[]> {
             params: {
                 jql: 'project = EET AND status != Done AND status != "Ready for testing" ORDER BY priority DESC',
                 fields: 'summary,status,assignee,timeestimate,timeoriginalestimate,priority,parent,issuelinks',
-                expand: 'names,schema'
+                expand: 'names,schema',
+                maxResults: 1000
             }
         });
         
