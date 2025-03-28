@@ -2,6 +2,7 @@ import axios from 'axios';
 import { Issue } from './types';
 import * as dotenv from 'dotenv';
 import path from 'path';
+import { logger } from './utils/logger';
 
 // Laad .env.local bestand
 dotenv.config({ path: path.resolve(__dirname, '../.env.local') });
@@ -101,12 +102,8 @@ export function formatTime(seconds: number | undefined): string {
 
 export async function getActiveIssues(): Promise<Issue[]> {
     try {
-        console.log('Start ophalen van Jira issues...');
-        console.log('Jira configuratie:', {
-            domain: JIRA_DOMAIN,
-            email: JIRA_EMAIL,
-            hasToken: !!JIRA_API_TOKEN
-        });
+        logger.log('Start ophalen van Jira issues...');
+        logger.log(`Jira configuratie - Domain: ${JIRA_DOMAIN}, Email: ${JIRA_EMAIL}, Has Token: ${!!JIRA_API_TOKEN}`);
         
         let allIssues: Issue[] = [];
         let startAt = 0;
@@ -127,21 +124,21 @@ export async function getActiveIssues(): Promise<Issue[]> {
             const issues = response.data.issues || [];
             allIssues = allIssues.concat(issues);
             
-            console.log(`Pagina ${Math.floor(startAt / maxResults) + 1}: ${issues.length} issues gevonden`);
+            logger.log(`Pagina ${Math.floor(startAt / maxResults) + 1}: ${issues.length} issues gevonden`);
             
             // Check of er meer pagina's zijn
             hasMore = issues.length === maxResults;
             startAt += maxResults;
         }
         
-        console.log('Totaal aantal issues gevonden:', allIssues.length);
+        logger.log(`Totaal aantal issues gevonden: ${allIssues.length}`);
         return allIssues;
     } catch (error: any) {
-        console.error('Error fetching issues:', {
+        logger.error(`Error fetching issues: ${JSON.stringify({
             message: error.message,
             response: error.response?.data,
             status: error.response?.status
-        });
+        })}`);
         return [];
     }
 }
@@ -224,15 +221,10 @@ export async function getSprintName(issue: Issue): Promise<string> {
     }
 }
 
-interface Sprint {
-    id: number;
-    name: string;
-    state: string;
-}
-
 interface SprintCapacity {
     assignee: string;
     capacity: number;
+    sprintId: number;
 }
 
 interface PriorityOrder {
@@ -241,191 +233,366 @@ interface PriorityOrder {
 
 export async function getSprintCapacity(): Promise<SprintCapacity[]> {
     const response = await jiraClient.get('/rest/api/3/search?jql=project = EET AND issuetype = "Sprint Capacity"');
-    return response.data.issues.map((issue: any) => ({
-        assignee: issue.fields.assignee?.displayName || 'Unassigned',
-        capacity: issue.fields.customfield_10014 || 0
-    }));
+    const maxSprints = 10;
+    const capacities: SprintCapacity[] = [];
+    
+    // Standaard capaciteit per medewerker
+    const defaultCapacities: { [key: string]: number } = {
+        'Peter van Diermen': 40,
+        'Adit Shah': 60,
+        'Bart Hermans': 16,
+        'Florian de Jong': 8,
+        'Milan van Dijk': 40,
+        'virendra kumar': 60
+    };
+    
+    // Verwerk eerst de issues uit Jira
+    response.data.issues.forEach((issue: any) => {
+        const assignee = issue.fields.assignee?.displayName || 'Unassigned';
+        const capacity = issue.fields.customfield_10014 || defaultCapacities[assignee] || 0;
+        
+        // Maak een capaciteit entry voor elke sprint
+        for (let i = 1; i <= maxSprints; i++) {
+            capacities.push({
+                assignee,
+                capacity,
+                sprintId: i
+            });
+        }
+    });
+    
+    // Voeg eventueel ontbrekende medewerkers toe met standaard capaciteit
+    Object.entries(defaultCapacities).forEach(([assignee, capacity]) => {
+        if (!capacities.some(c => c.assignee === assignee)) {
+            for (let i = 1; i <= maxSprints; i++) {
+                capacities.push({
+                    assignee,
+                    capacity,
+                    sprintId: i
+                });
+            }
+        }
+    });
+    
+    return capacities;
 }
 
-export async function getPlanning(): Promise<Issue[]> {
-    const issues = await getActiveIssues();
-    const sprintCapacity = await getSprintCapacity();
-    const sprintCapacityMap = new Map(sprintCapacity.map((cap: SprintCapacity) => [cap.assignee, cap.capacity]));
+interface PlanningResult {
+  issues: Issue[];
+  sprints: SprintCapacity[];
+  sprintAssignments: Record<string, Record<string, Issue[]>>;
+  sprintHours: Record<string, Record<string, number>>;
+}
+
+export async function getPlanning(): Promise<PlanningResult> {
+  const issues = await getActiveIssues();
+  const sprints = await getSprintCapacity();
+  const sprintAssignments = new Map<string, Map<number, Issue[]>>();
+  const sprintHours = new Map<string, Map<number, number>>();
+  const sprintCapacity = new Map<string, Map<number, number>>();
+  const sprintRemainingHours = new Map<string, Map<number, number>>();
+
+  // Initialiseer maps voor sprint toewijzingen en uren
+  sprints.forEach(sprint => {
+    if (!sprintAssignments.has(sprint.assignee)) {
+      sprintAssignments.set(sprint.assignee, new Map());
+      sprintHours.set(sprint.assignee, new Map());
+      sprintCapacity.set(sprint.assignee, new Map());
+      sprintRemainingHours.set(sprint.assignee, new Map());
+    }
+    // Zet de capaciteit voor deze medewerker voor deze sprint
+    sprintCapacity.get(sprint.assignee)?.set(sprint.sprintId, sprint.capacity);
+    // Initialiseer de resterende uren met de volledige capaciteit
+    sprintRemainingHours.get(sprint.assignee)?.set(sprint.sprintId, sprint.capacity);
+  });
+
+  // Log de geïnitialiseerde capaciteit en resterende uren
+  logger.log('\nGeïnitialiseerde capaciteit en resterende uren per medewerker:');
+  for (const [assignee, capacityMap] of sprintCapacity) {
+    logger.log(`\n${assignee}:`);
+    for (let sprintId = 1; sprintId <= 10; sprintId++) {
+      const capacity = capacityMap.get(sprintId) || 0;
+      const remaining = sprintRemainingHours.get(assignee)?.get(sprintId) || 0;
+      logger.log(`Sprint ${sprintId}: ${capacity} uren capaciteit, ${remaining} uren resterend`);
+    }
+  }
+
+  // Groepeer issues per project
+  const issuesByProject = new Map<string, Issue[]>();
+  issues.forEach(issue => {
+    const projectKey = issue.key.split('-')[0];
+    if (!issuesByProject.has(projectKey)) {
+      issuesByProject.set(projectKey, []);
+    }
+    issuesByProject.get(projectKey)!.push(issue);
+  });
+
+  // Verwerk issues per project
+  for (const [projectKey, projectIssues] of issuesByProject) {
+    logger.log(`\nVerwerken van project ${projectKey}...`);
     
-    // Groepeer issues per medewerker
-    const issuesPerAssignee = new Map<string, Issue[]>();
-    issues.forEach(issue => {
-        const assignee = issue.fields.assignee?.displayName || 'Unassigned';
-        if (!issuesPerAssignee.has(assignee)) {
-            issuesPerAssignee.set(assignee, []);
-        }
-        issuesPerAssignee.get(assignee)?.push(issue);
+    // Sorteer issues op prioriteit en key
+    const sortedIssues = [...projectIssues].sort((a, b) => {
+      const priorityOrder: PriorityOrder = { Highest: 0, High: 1, Medium: 2, Low: 3, Lowest: 4 };
+      const priorityCompare = (priorityOrder[a.fields.priority.name] || 5) - (priorityOrder[b.fields.priority.name] || 5);
+      if (priorityCompare !== 0) return priorityCompare;
+      return a.key.localeCompare(b.key);
     });
 
-    // Verwerk elke medewerker
-    const maxSprints = 10;
-    const sprintAssignments = new Map<number, Map<string, Issue[]>>();
-    const sprintHours = new Map<number, Map<string, number>>();
-    const issueSprintMap = new Map<string, number>();
+    // Verwerk eerst issues zonder opvolgers (behalve Peter van Diermen)
+    for (const issue of sortedIssues) {
+      if (issue.fields.assignee?.displayName === 'Peter van Diermen') continue;
+      
+      const successors = issue.fields.issuelinks?.filter(link => link.type.name === 'Blocks' && link.outwardIssue) || [];
+      if (successors.length > 0) continue;
 
-    // Initialiseer de maps voor elke sprint
-    for (let sprint = 1; sprint <= maxSprints; sprint++) {
-        sprintAssignments.set(sprint, new Map());
-        sprintHours.set(sprint, new Map());
+      const estimate = issue.fields.timeestimate || 0;
+      const assignee = issue.fields.assignee?.displayName || 'Unassigned';
+      logger.log(`\nBezig met plannen van issue ${issue.key} (${estimate} uren) voor ${assignee} - Status: ${issue.fields.status.name}`);
+      
+      // Zoek de vroegst mogelijke sprint
+      let assigned = false;
+      for (let sprintId = 1; sprintId <= 10 && !assigned; sprintId++) {
+        const availableHours = sprintCapacity.get(assignee)?.get(sprintId) || 0;
+        const remainingHours = sprintRemainingHours.get(assignee)?.get(sprintId) || 0;
+        const assignments = sprintAssignments.get(assignee)?.get(sprintId) || [];
+        const totalHours = assignments.reduce((sum, i) => sum + (i.fields.timeestimate || 0), 0);
+        const currentHours = sprintHours.get(assignee)?.get(sprintId) || 0;
+
+        logger.log(`\nControle sprint ${sprintId} voor ${assignee}:`);
+        logger.log(`- Beschikbare uren: ${availableHours}`);
+        logger.log(`- Huidige uren gebruikt: ${currentHours}`);
+        logger.log(`- Totaal uren van toegewezen issues: ${totalHours}`);
+        logger.log(`- Issue uren: ${estimate}`);
+        logger.log(`- Resterende uren: ${remainingHours}`);
+
+        // Controleer of er voldoende resterende uren zijn
+        if (estimate <= remainingHours) {
+          if (!sprintAssignments.get(assignee)?.has(sprintId)) {
+            sprintAssignments.get(assignee)?.set(sprintId, []);
+          }
+          sprintAssignments.get(assignee)?.get(sprintId)?.push(issue);
+          // Update de uur-tellers
+          sprintHours.get(assignee)?.set(sprintId, currentHours + estimate);
+          sprintRemainingHours.get(assignee)?.set(sprintId, remainingHours - estimate);
+          logger.log(`✅ Issue ${issue.key} toegewezen aan sprint ${sprintId}`);
+          logger.log(`- Nieuwe resterende uren: ${remainingHours - estimate}`);
+          assigned = true;
+        } else {
+          logger.log(`❌ Issue ${issue.key} past niet in sprint ${sprintId}`);
+          logger.log(`  - Issue uren (${estimate}) overschrijdt resterende uren (${remainingHours})`);
+        }
+      }
+
+      if (!assigned) {
+        logger.log(`⚠️ Issue ${issue.key} kon niet worden toegewezen aan een sprint binnen de beschikbare capaciteit`);
+      }
     }
 
-    // Verwerk elke medewerker
-    for (const [assignee, assigneeIssues] of issuesPerAssignee) {
-        const capacity = sprintCapacityMap.get(assignee) || 0;
-        console.log(`\nVerwerken van issues voor ${assignee} (${assigneeIssues.length} issues)`);
-        console.log(`Beschikbare uren per sprint: ${capacity}`);
+    // Verwerk issues met opvolgers (behalve Peter van Diermen)
+    for (const issue of sortedIssues) {
+      if (issue.fields.assignee?.displayName === 'Peter van Diermen') continue;
+      
+      const successors = issue.fields.issuelinks?.filter(link => link.type.name === 'Blocks' && link.outwardIssue) || [];
+      if (successors.length === 0) continue;
 
-        // Sorteer issues op prioriteit
-        const priorityOrder: PriorityOrder = { Highest: 1, High: 2, Medium: 3, Low: 4, Lowest: 5 };
-        const sortedIssues = assigneeIssues.sort((a, b) => priorityOrder[a.fields.priority.name] - priorityOrder[b.fields.priority.name]);
+      const estimate = issue.fields.timeestimate || 0;
+      const assignee = issue.fields.assignee?.displayName || 'Unassigned';
+      logger.log(`\nBezig met plannen van issue ${issue.key} (${estimate} uren) voor ${assignee} - Status: ${issue.fields.status.name}`);
+      logger.log(`Opvolgers: ${successors.map(s => s.inwardIssue?.key).join(', ')}`);
 
-        // Verwerk eerst issues zonder opvolgers
-        const issuesWithoutSuccessors = sortedIssues.filter(issue => 
-            !issue.fields.issuelinks?.some(link => 
-                link.type.name === 'Blocks' && link.outwardIssue
-            )
-        );
+      // Zoek de vroegst mogelijke sprint
+      let assigned = false;
+      for (let sprintId = 1; sprintId <= 10 && !assigned; sprintId++) {
+        const availableHours = sprintCapacity.get(assignee)?.get(sprintId) || 0;
+        const remainingHours = sprintRemainingHours.get(assignee)?.get(sprintId) || 0;
+        const assignments = sprintAssignments.get(assignee)?.get(sprintId) || [];
+        const totalHours = assignments.reduce((sum, i) => sum + (i.fields.timeestimate || 0), 0);
+        const currentHours = sprintHours.get(assignee)?.get(sprintId) || 0;
 
-        // Verwerk issues zonder opvolgers
-        for (const issue of issuesWithoutSuccessors) {
-            const hours = issue.fields.timeestimate || 0;
-            let assigned = false;
+        logger.log(`\nControle sprint ${sprintId} voor ${assignee}:`);
+        logger.log(`- Beschikbare uren: ${availableHours}`);
+        logger.log(`- Huidige uren gebruikt: ${currentHours}`);
+        logger.log(`- Totaal uren van toegewezen issues: ${totalHours}`);
+        logger.log(`- Issue uren: ${estimate}`);
+        logger.log(`- Resterende uren: ${remainingHours}`);
 
-            // Zoek een sprint waar dit issue in past
-            for (let sprint = 1; sprint <= maxSprints; sprint++) {
-                const currentHours = sprintHours.get(sprint)?.get(assignee) || 0;
-                const remainingCapacity = capacity - currentHours;
-
-                // Controleer strikt of het issue past binnen de resterende capaciteit
-                if (hours <= remainingCapacity) {
-                    if (!sprintAssignments.get(sprint)?.has(assignee)) {
-                        sprintAssignments.get(sprint)?.set(assignee, []);
-                    }
-                    sprintAssignments.get(sprint)?.get(assignee)?.push(issue);
-                    sprintHours.get(sprint)?.set(assignee, currentHours + hours);
-                    issueSprintMap.set(issue.key, sprint);
-                    assigned = true;
-                    console.log(`Issue ${issue.key} (${hours} uren) toegewezen aan sprint ${sprint} voor ${assignee}`);
-                    console.log(`Nieuwe sprint uren: ${currentHours + hours} van ${capacity}`);
-                    break;
-                }
-            }
-
-            if (!assigned) {
-                console.log(`WAARSCHUWING: Issue ${issue.key} past niet binnen de beschikbare uren voor ${assignee}`);
-            }
+        // Controleer of er voldoende resterende uren zijn
+        if (estimate <= remainingHours) {
+          if (!sprintAssignments.get(assignee)?.has(sprintId)) {
+            sprintAssignments.get(assignee)?.set(sprintId, []);
+          }
+          sprintAssignments.get(assignee)?.get(sprintId)?.push(issue);
+          // Update de uur-tellers
+          sprintHours.get(assignee)?.set(sprintId, currentHours + estimate);
+          sprintRemainingHours.get(assignee)?.set(sprintId, remainingHours - estimate);
+          logger.log(`✅ Issue ${issue.key} toegewezen aan sprint ${sprintId}`);
+          logger.log(`- Nieuwe resterende uren: ${remainingHours - estimate}`);
+          assigned = true;
+        } else {
+          logger.log(`❌ Issue ${issue.key} past niet in sprint ${sprintId}`);
+          logger.log(`  - Issue uren (${estimate}) overschrijdt resterende uren (${remainingHours})`);
         }
+      }
 
-        // Verwerk issues met opvolgers
-        const issuesWithSuccessors = sortedIssues.filter(issue => 
-            issue.fields.issuelinks?.some(link => 
-                link.type.name === 'Blocks' && link.outwardIssue
-            )
-        );
-
-        for (const issue of issuesWithSuccessors) {
-            const hours = issue.fields.timeestimate || 0;
-            let assigned = false;
-
-            // Bepaal de vroegst mogelijke sprint op basis van de issues waarvan dit een opvolger is
-            let earliestPossibleSprint = 1;
-            if (issue.fields.issuelinks) {
-                for (const link of issue.fields.issuelinks) {
-                    if (link.type.name === 'Blocks' && link.outwardIssue) {
-                        const predecessorSprint = issueSprintMap.get(link.outwardIssue.key) || 0;
-                        earliestPossibleSprint = Math.max(earliestPossibleSprint, predecessorSprint + 1);
-                    }
-                }
-            }
-
-            // Zoek een sprint waar dit issue in past, beginnend bij de vroegst mogelijke sprint
-            for (let sprint = earliestPossibleSprint; sprint <= maxSprints; sprint++) {
-                const currentHours = sprintHours.get(sprint)?.get(assignee) || 0;
-                const remainingCapacity = capacity - currentHours;
-
-                // Controleer strikt of het issue past binnen de resterende capaciteit
-                if (hours <= remainingCapacity) {
-                    if (!sprintAssignments.get(sprint)?.has(assignee)) {
-                        sprintAssignments.get(sprint)?.set(assignee, []);
-                    }
-                    sprintAssignments.get(sprint)?.get(assignee)?.push(issue);
-                    sprintHours.get(sprint)?.set(assignee, currentHours + hours);
-                    issueSprintMap.set(issue.key, sprint);
-                    assigned = true;
-                    console.log(`Issue ${issue.key} (${hours} uren) toegewezen aan sprint ${sprint} voor ${assignee}`);
-                    console.log(`Nieuwe sprint uren: ${currentHours + hours} van ${capacity}`);
-                    break;
-                }
-            }
-
-            if (!assigned) {
-                console.log(`WAARSCHUWING: Issue ${issue.key} met opvolgers past niet binnen de beschikbare uren voor ${assignee}`);
-            }
-        }
+      if (!assigned) {
+        logger.log(`⚠️ Issue ${issue.key} kon niet worden toegewezen aan een sprint binnen de beschikbare capaciteit`);
+      }
     }
 
-    // Vul resterende tijd op met issues van Peter van Diermen
-    const peterIssues = issuesPerAssignee.get('Peter van Diermen') || [];
-    const peterCapacity = sprintCapacityMap.get('Peter van Diermen') || 0;
+    // Verwerk Peter van Diermen's issues
+    const peterIssues = sortedIssues.filter(issue => issue.fields.assignee?.displayName === 'Peter van Diermen');
+    logger.log(`\nVerwerken van ${peterIssues.length} issues voor Peter van Diermen...`);
 
-    // Sorteer Peter's issues op prioriteit
-    const priorityOrder: PriorityOrder = { Highest: 1, High: 2, Medium: 3, Low: 4, Lowest: 5 };
-    const sortedPeterIssues = peterIssues.sort((a, b) => priorityOrder[a.fields.priority.name] - priorityOrder[b.fields.priority.name]);
+    // Eerst issues zonder opvolgers
+    for (const issue of peterIssues) {
+      const successors = issue.fields.issuelinks?.filter(link => link.type.name === 'Blocks' && link.outwardIssue) || [];
+      if (successors.length > 0) continue;
 
-    // Verwerk Peter's issues per sprint
-    for (let sprint = 1; sprint <= maxSprints; sprint++) {
-        const currentHours = sprintHours.get(sprint)?.get('Peter van Diermen') || 0;
-        const remainingCapacity = peterCapacity - currentHours;
+      const estimate = issue.fields.timeestimate || 0;
+      logger.log(`\nBezig met plannen van issue ${issue.key} (${estimate} uren) voor Peter van Diermen - Status: ${issue.fields.status.name}`);
 
-        if (remainingCapacity > 0) {
-            for (const issue of sortedPeterIssues) {
-                const hours = issue.fields.timeestimate || 0;
-                
-                // Skip als het issue al is toegewezen
-                if (sprintAssignments.get(sprint)?.get('Peter van Diermen')?.some(i => i.key === issue.key)) {
-                    continue;
-                }
+      // Zoek de vroegst mogelijke sprint
+      let assigned = false;
+      for (let sprintId = 1; sprintId <= 10 && !assigned; sprintId++) {
+        const availableHours = sprintCapacity.get('Peter van Diermen')?.get(sprintId) || 0;
+        const remainingHours = sprintRemainingHours.get('Peter van Diermen')?.get(sprintId) || 0;
+        const assignments = sprintAssignments.get('Peter van Diermen')?.get(sprintId) || [];
+        const totalHours = assignments.reduce((sum, i) => sum + (i.fields.timeestimate || 0), 0);
+        const currentHours = sprintHours.get('Peter van Diermen')?.get(sprintId) || 0;
 
-                // Controleer strikt of het issue past binnen de resterende capaciteit
-                if (hours <= remainingCapacity) {
-                    if (!sprintAssignments.get(sprint)?.has('Peter van Diermen')) {
-                        sprintAssignments.get(sprint)?.set('Peter van Diermen', []);
-                    }
-                    sprintAssignments.get(sprint)?.get('Peter van Diermen')?.push(issue);
-                    sprintHours.get(sprint)?.set('Peter van Diermen', currentHours + hours);
-                    console.log(`Issue ${issue.key} (${hours} uren) toegewezen aan sprint ${sprint} voor Peter van Diermen`);
-                    console.log(`Nieuwe sprint uren: ${currentHours + hours} van ${peterCapacity}`);
-                }
-            }
+        logger.log(`\nControle sprint ${sprintId} voor Peter van Diermen:`);
+        logger.log(`- Beschikbare uren: ${availableHours}`);
+        logger.log(`- Huidige uren gebruikt: ${currentHours}`);
+        logger.log(`- Totaal uren van toegewezen issues: ${totalHours}`);
+        logger.log(`- Issue uren: ${estimate}`);
+        logger.log(`- Resterende uren: ${remainingHours}`);
+
+        // Controleer of er voldoende resterende uren zijn
+        if (estimate <= remainingHours) {
+          if (!sprintAssignments.get('Peter van Diermen')?.has(sprintId)) {
+            sprintAssignments.get('Peter van Diermen')?.set(sprintId, []);
+          }
+          sprintAssignments.get('Peter van Diermen')?.get(sprintId)?.push(issue);
+          // Update de uur-tellers
+          sprintHours.get('Peter van Diermen')?.set(sprintId, currentHours + estimate);
+          sprintRemainingHours.get('Peter van Diermen')?.set(sprintId, remainingHours - estimate);
+          logger.log(`✅ Issue ${issue.key} toegewezen aan sprint ${sprintId}`);
+          logger.log(`- Nieuwe resterende uren: ${remainingHours - estimate}`);
+          assigned = true;
+        } else {
+          logger.log(`❌ Issue ${issue.key} past niet in sprint ${sprintId}`);
+          logger.log(`  - Issue uren (${estimate}) overschrijdt resterende uren (${remainingHours})`);
         }
+      }
+
+      if (!assigned) {
+        logger.log(`⚠️ Issue ${issue.key} kon niet worden toegewezen aan een sprint binnen de beschikbare capaciteit`);
+      }
     }
 
-    // Update de sprint toewijzingen
-    for (const [sprint, assigneeIssues] of sprintAssignments) {
-        for (const [assignee, sprintIssues] of assigneeIssues) {
-            const totalHours = sprintIssues.reduce((sum, issue) => sum + (issue.fields.timeestimate || 0), 0);
-            const capacity = sprintCapacityMap.get(assignee) || 0;
-            console.log(`\nSprint ${sprint} voor ${assignee}:`);
-            console.log(`Totaal gebruikte uren: ${totalHours} van ${capacity}`);
-            if (totalHours > capacity) {
-                console.error(`ERROR: Sprint ${sprint} voor ${assignee} overschrijdt de capaciteit: ${totalHours} > ${capacity}`);
-            }
-            for (const issue of sprintIssues) {
-                const hours = issue.fields.timeestimate || 0;
-                console.log(`- ${issue.key}: ${hours} uren`);
-                issue.fields.customfield_10020 = [{
-                    id: sprint,
-                    name: `Sprint ${sprint}`,
-                    state: sprint === 1 ? 'active' : 'future'
-                }];
-            }
-        }
-    }
+    // Dan issues met opvolgers
+    for (const issue of peterIssues) {
+      const successors = issue.fields.issuelinks?.filter(link => link.type.name === 'Blocks' && link.outwardIssue) || [];
+      if (successors.length === 0) continue;
 
-    return issues;
+      const estimate = issue.fields.timeestimate || 0;
+      logger.log(`\nBezig met plannen van issue ${issue.key} (${estimate} uren) voor Peter van Diermen - Status: ${issue.fields.status.name}`);
+      logger.log(`Opvolgers: ${successors.map(s => s.inwardIssue?.key).join(', ')}`);
+
+      // Zoek de vroegst mogelijke sprint
+      let assigned = false;
+      for (let sprintId = 1; sprintId <= 10 && !assigned; sprintId++) {
+        const availableHours = sprintCapacity.get('Peter van Diermen')?.get(sprintId) || 0;
+        const remainingHours = sprintRemainingHours.get('Peter van Diermen')?.get(sprintId) || 0;
+        const assignments = sprintAssignments.get('Peter van Diermen')?.get(sprintId) || [];
+        const totalHours = assignments.reduce((sum, i) => sum + (i.fields.timeestimate || 0), 0);
+        const currentHours = sprintHours.get('Peter van Diermen')?.get(sprintId) || 0;
+
+        logger.log(`\nControle sprint ${sprintId} voor Peter van Diermen:`);
+        logger.log(`- Beschikbare uren: ${availableHours}`);
+        logger.log(`- Huidige uren gebruikt: ${currentHours}`);
+        logger.log(`- Totaal uren van toegewezen issues: ${totalHours}`);
+        logger.log(`- Issue uren: ${estimate}`);
+        logger.log(`- Resterende uren: ${remainingHours}`);
+
+        // Controleer of er voldoende resterende uren zijn
+        if (estimate <= remainingHours) {
+          if (!sprintAssignments.get('Peter van Diermen')?.has(sprintId)) {
+            sprintAssignments.get('Peter van Diermen')?.set(sprintId, []);
+          }
+          sprintAssignments.get('Peter van Diermen')?.get(sprintId)?.push(issue);
+          // Update de uur-tellers
+          sprintHours.get('Peter van Diermen')?.set(sprintId, currentHours + estimate);
+          sprintRemainingHours.get('Peter van Diermen')?.set(sprintId, remainingHours - estimate);
+          logger.log(`✅ Issue ${issue.key} toegewezen aan sprint ${sprintId}`);
+          logger.log(`- Nieuwe resterende uren: ${remainingHours - estimate}`);
+          assigned = true;
+        } else {
+          logger.log(`❌ Issue ${issue.key} past niet in sprint ${sprintId}`);
+          logger.log(`  - Issue uren (${estimate}) overschrijdt resterende uren (${remainingHours})`);
+        }
+      }
+
+      if (!assigned) {
+        logger.log(`⚠️ Issue ${issue.key} kon niet worden toegewezen aan een sprint binnen de beschikbare capaciteit`);
+      }
+    }
+  }
+
+  // Log de finale status van alle sprints
+  logger.log('\nFinale status van alle sprints:');
+  for (let sprintId = 1; sprintId <= 10; sprintId++) {
+    logger.log(`\nSprint ${sprintId}:`);
+    for (const [assignee, capacityMap] of sprintCapacity) {
+      const capacity = capacityMap.get(sprintId) || 0;
+      const remaining = sprintRemainingHours.get(assignee)?.get(sprintId) || 0;
+      const used = sprintHours.get(assignee)?.get(sprintId) || 0;
+      const assignments = sprintAssignments.get(assignee)?.get(sprintId) || [];
+      const totalHours = assignments.reduce((sum, i) => sum + (i.fields.timeestimate || 0), 0);
+      
+      logger.log(`${assignee}:`);
+      logger.log(`  - Capaciteit: ${capacity}`);
+      logger.log(`  - Gebruikte uren: ${used}`);
+      logger.log(`  - Resterende uren: ${remaining}`);
+      logger.log(`  - Totaal uren van issues: ${totalHours}`);
+      
+      if (used > capacity || totalHours > capacity) {
+        logger.log(`❌ OVERSCHRIJDING DETECTEERD:`);
+        if (used > capacity) {
+          logger.log(`  - Gebruikte uren (${used}) > Capaciteit (${capacity})`);
+        }
+        if (totalHours > capacity) {
+          logger.log(`  - Totaal uren van issues (${totalHours}) > Capaciteit (${capacity})`);
+        }
+      }
+    }
+  }
+
+  // Converteer Maps naar Records
+  const sprintAssignmentsRecord: Record<string, Record<string, Issue[]>> = {};
+  for (const [assignee, sprintMap] of sprintAssignments) {
+    sprintAssignmentsRecord[assignee] = {};
+    for (const [sprintId, issues] of sprintMap) {
+      sprintAssignmentsRecord[assignee][sprintId.toString()] = issues;
+    }
+  }
+
+  const sprintHoursRecord: Record<string, Record<string, number>> = {};
+  for (const [assignee, sprintMap] of sprintHours) {
+    sprintHoursRecord[assignee] = {};
+    for (const [sprintId, hours] of sprintMap) {
+      sprintHoursRecord[assignee][sprintId.toString()] = hours;
+    }
+  }
+
+  // At the end of the function, close the logger
+  logger.close();
+
+  return {
+    issues,
+    sprints,
+    sprintAssignments: sprintAssignmentsRecord,
+    sprintHours: sprintHoursRecord
+  };
 } 

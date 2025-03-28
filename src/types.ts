@@ -15,19 +15,36 @@ export interface Issue {
             name: string;
             id: string;
         };
-        customfield_10020?: {
-            id: number;
-            name: string;
-            state: string;
-            boardId: number;
-        }[];
-        issuelinks?: IssueLink[];
         parent?: {
             key: string;
             fields: {
                 summary: string;
             };
         };
+        issuelinks?: Array<{
+            type: {
+                name: string;
+                inward: string;
+                outward: string;
+            };
+            inwardIssue?: {
+                key: string;
+                fields: {
+                    summary: string;
+                };
+            };
+            outwardIssue?: {
+                key: string;
+                fields: {
+                    summary: string;
+                };
+            };
+        }>;
+        customfield_10020?: Array<{
+            id: number;
+            name: string;
+            state: string;
+        }>;
         successors?: string[];
         issuetype: {
             name: string;
