@@ -352,26 +352,86 @@ function calculatePlanning(issues: Issue[], googleSheetsData: string[][] | null,
 
         // Als er nog tijd over is in de huidige sprint, plaats het issue daar
         if (currentEmployeeHours < sprintCapacity) {
-            // Update sprint uren
-            currentSprintHours.set(assignee, Number((currentEmployeeHours + hours).toFixed(1)));
-            sprintHours.set(assignedSprint, currentSprintHours);
-            foundSprint = true;
+            // Controleer of het issue binnen de resterende beschikbare tijd past
+            const remainingCapacity = sprintCapacity - currentEmployeeHours;
+            console.log(`\nControle beschikbare tijd voor ${assignee} in sprint ${assignedSprint}:`);
+            console.log(`- Sprint capaciteit: ${sprintCapacity} uren`);
+            console.log(`- Gebruikte uren: ${currentEmployeeHours} uren`);
+            console.log(`- Resterende capaciteit: ${remainingCapacity} uren`);
+            console.log(`- Issue uren: ${hours} uren`);
+
+            if (hours <= remainingCapacity) {
+                // Update sprint uren
+                currentSprintHours.set(assignee, currentEmployeeHours + hours);
+                sprintHours.set(assignedSprint, currentSprintHours);
+                foundSprint = true;
+                console.log(`✓ Issue past binnen de beschikbare tijd (${hours} uren <= ${remainingCapacity} uren)`);
+            } else {
+                console.log(`✗ Issue past niet binnen de beschikbare tijd (${hours} uren > ${remainingCapacity} uren)`);
+                // Zoek de volgende sprint
+                assignedSprint++;
+                while (assignedSprint <= maxSprints) {
+                    const sprintEmployeeHours = sprintHours.get(assignedSprint) || new Map<string, number>();
+                    const employeeHoursInSprint = sprintEmployeeHours.get(assignee) || 0;
+
+                    console.log(`\nControle sprint ${assignedSprint}:`);
+                    console.log(`- Sprint capaciteit: ${sprintCapacity} uren`);
+                    console.log(`- Gebruikte uren: ${employeeHoursInSprint} uren`);
+                    console.log(`- Resterende capaciteit: ${sprintCapacity - employeeHoursInSprint} uren`);
+                    console.log(`- Issue uren: ${hours} uren`);
+
+                    // Als er nog tijd over is in deze sprint, plaats het issue daar
+                    if (employeeHoursInSprint < sprintCapacity) {
+                        const remainingCapacity = sprintCapacity - employeeHoursInSprint;
+                        if (hours <= remainingCapacity) {
+                            // Update sprint uren
+                            sprintEmployeeHours.set(assignee, employeeHoursInSprint + hours);
+                            sprintHours.set(assignedSprint, sprintEmployeeHours);
+                            foundSprint = true;
+                            console.log(`✓ Issue past binnen de beschikbare tijd (${hours} uren <= ${remainingCapacity} uren)`);
+                            break;
+                        } else {
+                            console.log(`✗ Issue past niet binnen de beschikbare tijd (${hours} uren > ${remainingCapacity} uren)`);
+                        }
+                    } else {
+                        console.log(`✗ Sprint ${assignedSprint} is vol (${employeeHoursInSprint} uren gebruikt van ${sprintCapacity} uren)`);
+                    }
+
+                    assignedSprint++;
+                }
+            }
         } else {
-            // Als de issue niet in de huidige sprint past, zoek de volgende beschikbare sprint
+            console.log(`\nSprint ${assignedSprint} is vol voor ${assignee}:`);
+            console.log(`- Sprint capaciteit: ${sprintCapacity} uren`);
+            console.log(`- Gebruikte uren: ${currentEmployeeHours} uren`);
+            console.log(`- Issue uren: ${hours} uren`);
+            // Zoek de volgende sprint
             assignedSprint++;
             while (assignedSprint <= maxSprints) {
                 const sprintEmployeeHours = sprintHours.get(assignedSprint) || new Map<string, number>();
-                const employeeHoursInSprint = Number((sprintEmployeeHours.get(assignee) || 0).toFixed(1));
+                const employeeHoursInSprint = sprintEmployeeHours.get(assignee) || 0;
 
-                logger.log(`Sprint ${assignedSprint}: ${employeeHoursInSprint} uren gebruikt van ${sprintCapacity}`);
+                console.log(`\nControle sprint ${assignedSprint}:`);
+                console.log(`- Sprint capaciteit: ${sprintCapacity} uren`);
+                console.log(`- Gebruikte uren: ${employeeHoursInSprint} uren`);
+                console.log(`- Resterende capaciteit: ${sprintCapacity - employeeHoursInSprint} uren`);
+                console.log(`- Issue uren: ${hours} uren`);
 
                 // Als er nog tijd over is in deze sprint, plaats het issue daar
                 if (employeeHoursInSprint < sprintCapacity) {
-                    // Update sprint uren
-                    sprintEmployeeHours.set(assignee, Number((employeeHoursInSprint + hours).toFixed(1)));
-                    sprintHours.set(assignedSprint, sprintEmployeeHours);
-                    foundSprint = true;
-                    break;
+                    const remainingCapacity = sprintCapacity - employeeHoursInSprint;
+                    if (hours <= remainingCapacity) {
+                        // Update sprint uren
+                        sprintEmployeeHours.set(assignee, employeeHoursInSprint + hours);
+                        sprintHours.set(assignedSprint, sprintEmployeeHours);
+                        foundSprint = true;
+                        console.log(`✓ Issue past binnen de beschikbare tijd (${hours} uren <= ${remainingCapacity} uren)`);
+                        break;
+                    } else {
+                        console.log(`✗ Issue past niet binnen de beschikbare tijd (${hours} uren > ${remainingCapacity} uren)`);
+                    }
+                } else {
+                    console.log(`✗ Sprint ${assignedSprint} is vol (${employeeHoursInSprint} uren gebruikt van ${sprintCapacity} uren)`);
                 }
 
                 assignedSprint++;
