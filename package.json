@@ -1,23 +1,43 @@
 {
+  "name": "planning-pvd",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "NODE_OPTIONS='--loader ts-node/esm --no-warnings' ts-node-esm --project tsconfig.node.json src/server.ts",
+    "build": "tsc",
+    "dev": "ts-node-dev --respawn src/server.ts"
+  },
   "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.0",
+    "@mui/material": "^7.0.1",
     "@types/axios": "^0.14.4",
-    "@types/express": "^5.0.1",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
     "@types/jira-client": "^7.1.9",
+    "@types/node": "^20.11.24",
+    "@types/react": "^18.2.61",
+    "@types/react-dom": "^18.2.19",
+    "@types/winston": "^2.4.4",
     "axios": "^1.8.4",
     "cli-table3": "^0.6.5",
+    "cors": "^2.8.5",
     "date-fns": "^4.1.0",
-    "dotenv": "^16.4.7",
+    "dotenv": "^16.4.5",
     "ejs": "^3.1.10",
-    "express": "^4.21.2",
+    "express": "^4.18.3",
     "google-auth-library": "^9.15.1",
-    "googleapis": "^148.0.0",
-    "jira-client": "^8.2.2"
+    "googleapis": "^133.0.0",
+    "jira-client": "^8.2.2",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.3.3",
+    "winston": "^3.17.0"
   },
   "devDependencies": {
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3"
-  },
-  "scripts": {
-    "start": "ts-node src/server.ts"
   }
 }

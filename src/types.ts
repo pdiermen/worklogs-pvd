@@ -1,55 +1,9 @@
-export interface Issue {
-    key: string;
-    fields: {
-        summary: string;
-        status: {
-            name: string;
-        };
-        assignee?: {
-            displayName: string;
-        };
-        customfield_10002?: number;
-        timeoriginalestimate?: number;
-        timeestimate?: number;
-        priority: {
-            name: string;
-            id: string;
-        };
-        parent?: {
-            key: string;
-            fields: {
-                summary: string;
-            };
-        };
-        issuelinks?: Array<{
-            type: {
-                name: string;
-                inward: string;
-                outward: string;
-            };
-            inwardIssue?: {
-                key: string;
-                fields: {
-                    summary: string;
-                };
-            };
-            outwardIssue?: {
-                key: string;
-                fields: {
-                    summary: string;
-                };
-            };
-        }>;
-        customfield_10020?: Array<{
-            id: number;
-            name: string;
-            state: string;
-        }>;
-        successors?: string[];
-        issuetype: {
-            name: string;
-        };
-    };
+export interface IssueHistory {
+    created: string;
+    items: {
+        field: string;
+        toString: string;
+    }[];
 }
 
 export interface IssueLink {
@@ -62,4 +16,69 @@ export interface IssueLink {
     outwardIssue?: {
         key: string;
     };
+}
+
+export interface Sprint {
+    id: string;
+    self: string;
+    state: string;
+    name: string;
+}
+
+export interface Issue {
+    key: string;
+    fields: {
+        summary?: string;
+        timeestimate?: number;
+        status?: {
+            name: string;
+        };
+        assignee?: {
+            displayName: string;
+        };
+        priority?: {
+            name: string;
+        };
+        issuetype?: {
+            name: string;
+        };
+        issuelinks?: IssueLink[];
+        parent?: {
+            key: string;
+        };
+        customfield_10020?: Sprint[];
+    };
+    changelog?: {
+        histories: IssueHistory[];
+    };
+}
+
+export interface WorkLog {
+    issueKey: string;
+    issueSummary: string;
+    author: string;
+    timeSpentSeconds: number;
+    started: string;
+    comment?: string;
+    estimatedTime: number;
+}
+
+export interface EfficiencyData {
+    assignee: string;
+    estimated: string;
+    logged: string;
+    efficiency: string;
+}
+
+export interface EfficiencyTable {
+    [key: string]: {
+        totalTimeSpent: number;
+        totalTimeEstimate: number;
+        efficiency: number;
+    };
+}
+
+export interface WorkLogsResponse {
+    workLogs: WorkLog[];
+    efficiencyTable: EfficiencyData[];
 } 

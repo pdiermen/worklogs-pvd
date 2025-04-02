@@ -1,0 +1,1 @@
+export const JIRA_DOMAIN = process.env.JIRA_DOMAIN || 'jira.example.com'; 
