@@ -1,21 +1,28 @@
 # Dependencies
 node_modules/
 
-# Environment variables
+# Environment files
 .env
 .env.local
+.env.*
 
-# Credentials
-credentials.json
-
-# IDE
-.vscode/
-.idea/
+# Build output
+dist/
+build/
 
 # Logs
 *.log
 npm-debug.log*
 
-# OS
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+# Credentials
+credentials.json 
