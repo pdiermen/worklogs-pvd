@@ -1,5 +1,5 @@
 import express, { Request, Response, RequestHandler, NextFunction } from 'express';
-import type { Issue, IssueLink } from './types.js';
+import type { Issue, IssueLink, EfficiencyData } from './types.js';
 import * as dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -7,10 +7,11 @@ import { dirname } from 'path';
 import { google } from 'googleapis';
 import { JWT } from 'google-auth-library';
 import { logger } from './logger.js';
-import { getActiveIssues, getWorkLogs, getPlanning } from './jira.js';
+import { getActiveIssues, getWorkLogs, getPlanning, jiraClient } from './jira.js';
 import cors from 'cors';
-import { WorkLogsResponse } from './types';
+import { WorkLogsResponse, WorkLog } from './types.js';
 import { JIRA_DOMAIN } from './config.js';
+import axios from 'axios';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -64,6 +65,15 @@ const sheets = google.sheets({ version: 'v4', auth });
 
 app.use(cors());
 app.use(express.json());
+
+// Configureer axios interceptors voor error handling
+jiraClient.interceptors.response.use(
+    response => response,
+    error => {
+        console.error('Jira API Error:', error.response?.data || error.message);
+        return Promise.reject(new Error(error.response?.data?.errorMessages?.[0] || error.message));
+    }
+);
 
 async function getGoogleSheetsData(): Promise<string[][] | null> {
     try {
@@ -119,7 +129,7 @@ interface IssueHistory {
     }[];
 }
 
-function calculateEfficiency(issues: Issue[], worklogs: WorkLog[], startDate: Date, endDate: Date): string {
+function calculateEfficiency(issues: Issue[], worklogs: WorkLog[], startDate: Date, endDate: Date): EfficiencyData[] {
     // Filter issues die als "Closed" zijn gemarkeerd binnen de opgegeven periode
     const closedIssues = issues.filter(issue => {
         if (!issue.changelog?.histories) return false;
@@ -135,76 +145,60 @@ function calculateEfficiency(issues: Issue[], worklogs: WorkLog[], startDate: Da
         });
     });
 
-    // Groepeer worklogs per issue
-    const worklogsByIssue = worklogs.reduce((acc, worklog) => {
-        if (!acc[worklog.issueKey]) {
-            acc[worklog.issueKey] = [];
-        }
-        acc[worklog.issueKey].push(worklog);
-        return acc;
-    }, {} as Record<string, WorkLog[]>);
+    // Maak een map van medewerkers naar hun worklogs en issues
+    const employeeData = new Map<string, {
+        worklogs: WorkLog[],
+        issues: Issue[]
+    }>();
 
-    // Bereken efficiëntie per gesloten issue
-    const efficiencyData = closedIssues.map(issue => {
-        const issueWorklogs = worklogsByIssue[issue.key] || [];
-        const totalLoggedHours = issueWorklogs.reduce((sum, wl) => sum + wl.timeSpentSeconds / 3600, 0);
-        const estimatedHours = (issue.fields?.timeestimate || 0) / 3600;
-        const efficiency = estimatedHours > 0 ? (totalLoggedHours / estimatedHours) * 100 : 0;
+    // Verwerk alle closed issues en hun worklogs
+    closedIssues.forEach(issue => {
+        // Vind alle worklogs voor dit issue
+        const issueWorklogs = worklogs.filter(worklog => worklog.issueKey === issue.key);
+        
+        // Voor elke unieke medewerker die op dit issue heeft gelogd
+        const uniqueAuthors = new Set(issueWorklogs.map(worklog => worklog.author));
+        
+        uniqueAuthors.forEach(author => {
+            if (!employeeData.has(author)) {
+                employeeData.set(author, {
+                    worklogs: [],
+                    issues: []
+                });
+            }
+            
+            // Voeg het issue toe aan de issues van deze medewerker
+            employeeData.get(author)!.issues.push(issue);
+            
+            // Voeg alle worklogs van deze medewerker voor dit issue toe
+            const authorWorklogs = issueWorklogs.filter(worklog => worklog.author === author);
+            employeeData.get(author)!.worklogs.push(...authorWorklogs);
+        });
+    });
+
+    // Bereken efficiëntie per medewerker
+    return Array.from(employeeData.entries()).map(([employee, data]) => {
+        // Bereken totaal geplande uren (original estimate) voor closed issues waar deze medewerker op heeft gelogd
+        const totalEstimatedHours = data.issues.reduce((sum, issue) => {
+            const originalEstimate = issue.fields?.timeoriginalestimate || 0;
+            return sum + originalEstimate / 3600;
+        }, 0);
+
+        // Bereken totaal gelogde uren voor closed issues van deze medewerker
+        const totalLoggedHours = data.worklogs.reduce((sum, worklog) => {
+            return sum + worklog.timeSpentSeconds / 3600;
+        }, 0);
+
+        // Bereken efficiëntie
+        const efficiency = totalEstimatedHours > 0 ? (totalLoggedHours / totalEstimatedHours) * 100 : 0;
 
         return {
-            key: issue.key,
-            summary: issue.fields?.summary || '',
-            estimatedHours: estimatedHours.toFixed(1),
-            loggedHours: totalLoggedHours.toFixed(1),
+            assignee: employee,
+            estimated: totalEstimatedHours.toFixed(1),
+            logged: totalLoggedHours.toFixed(1),
             efficiency: efficiency.toFixed(1)
         };
     });
-
-    // Bereken totalen
-    const totalEstimatedHours = efficiencyData.reduce((sum, data) => sum + parseFloat(data.estimatedHours), 0);
-    const totalLoggedHours = efficiencyData.reduce((sum, data) => sum + parseFloat(data.loggedHours), 0);
-    const totalEfficiency = totalEstimatedHours > 0 ? (totalLoggedHours / totalEstimatedHours) * 100 : 0;
-
-    // Genereer HTML tabel
-    let html = `
-        <table class="table">
-            <thead>
-                <tr>
-                    <th>Issue</th>
-                    <th>Samenvatting</th>
-                    <th>Geplande uren</th>
-                    <th>Gelogde uren</th>
-                    <th>Efficiëntie (%)</th>
-                </tr>
-            </thead>
-            <tbody>
-    `;
-
-    efficiencyData.forEach(data => {
-        html += `
-            <tr>
-                <td><a href="https://${JIRA_DOMAIN}/browse/${data.key}" target="_blank">${data.key}</a></td>
-                <td>${data.summary}</td>
-                <td>${data.estimatedHours}</td>
-                <td>${data.loggedHours}</td>
-                <td>${data.efficiency}</td>
-            </tr>
-        `;
-    });
-
-    // Voeg totalen rij toe
-    html += `
-            <tr class="table-dark">
-                <td colspan="2"><strong>Totaal</strong></td>
-                <td><strong>${totalEstimatedHours.toFixed(1)}</strong></td>
-                <td><strong>${totalLoggedHours.toFixed(1)}</strong></td>
-                <td><strong>${totalEfficiency.toFixed(1)}</strong></td>
-            </tr>
-            </tbody>
-        </table>
-    `;
-
-    return html;
 }
 
 app.get('/worklogs', (req, res) => {
@@ -319,16 +313,32 @@ app.get('/worklogs', (req, res) => {
 app.get('/', async (req, res) => {
     try {
         // Haal issues op
-        const issues = await getActiveIssues();
+        let issues;
+        try {
+            issues = await getActiveIssues();
+        } catch (error) {
+            console.error('Error bij ophalen van active issues:', error);
+            throw error;
+        }
 
         // Haal Google Sheets data op
-        const googleSheetsData = await getGoogleSheetsData();
+        let googleSheetsData;
+        try {
+            googleSheetsData = await getGoogleSheetsData();
+        } catch (error) {
+            console.error('Error bij ophalen van Google Sheets data:', error);
+            throw error;
+        }
 
         // Haal sprint namen op voor alle issues
         const sprintNames = new Map<string, string>();
         for (const issue of issues) {
-            if (issue.fields.customfield_10020 && issue.fields.customfield_10020.length > 0) {
-                sprintNames.set(issue.key, await getSprintName(issue));
+            if (issue.fields?.customfield_10020 && issue.fields.customfield_10020.length > 0) {
+                try {
+                    sprintNames.set(issue.key, await getSprintName(issue));
+                } catch (error) {
+                    console.error(`Error bij ophalen sprint naam voor issue ${issue.key}:`, error);
+                }
             }
         }
 
@@ -344,18 +354,22 @@ app.get('/', async (req, res) => {
         });
 
         // Bereken planning voor beide projecten
-        const subscriptionPlanning = calculatePlanning(subscriptionIssues, googleSheetsData, 'subscription');
-        const atlantisPlanning = calculatePlanning(atlantisIssues, googleSheetsData, 'atlantis');
-
-        // Bereken uren per sprint voor beide projecten
-        const subscriptionSprintHours = getSprintHours(subscriptionPlanning, 'subscription');
-        const atlantisSprintHours = getSprintHours(atlantisPlanning, 'atlantis');
+        const subscriptionPlanning = calculatePlanning(subscriptionIssues, 'subscription', googleSheetsData);
+        const atlantisPlanning = calculatePlanning(atlantisIssues, 'atlantis', googleSheetsData);
 
         // Genereer HTML
         const html = generateHtml(issues, googleSheetsData, [], sprintNames);
         res.send(html);
     } catch (error) {
-        res.status(500).send('Er is een fout opgetreden bij het ophalen van de data.');
+        console.error('Error in root route:', error);
+        res.status(500).send(`
+            <div class="alert alert-danger">
+                Er is een fout opgetreden bij het ophalen van de data. 
+                Probeer de pagina te verversen of neem contact op met de beheerder als het probleem aanhoudt.
+                <br><br>
+                Error details: ${error instanceof Error ? error.message : String(error)}
+            </div>
+        `);
     }
 });
 
@@ -384,243 +398,307 @@ function getSuccessors(issue: Issue): string[] {
 }
 
 function formatTime(seconds: number | undefined): string {
-    if (!seconds) return '-';
+    if (seconds === undefined || seconds === null) return '-';
     return Number((seconds / 3600).toFixed(1)).toString();
 }
 
-function calculatePlanning(issues: Issue[], googleSheetsData: string[][] | null, projectType: 'atlantis' | 'subscription'): { issue: Issue; sprint: number }[] {
-    // Maak een map van effectieve uren en projecten per medewerker
-    const employeeDataMap = new Map<string, { hours: number; projects: string[] }>();
+// Functie om issues te sorteren volgens de gewenste volgorde
+function sortIssues(issues: Issue[]): Issue[] {
+    // Status prioriteit mapping
+    const statusPriority = {
+        'Resolved': 1,
+        'In Review': 2,
+        'Open': 3,
+        'Registered': 4
+    };
+
+    // Prioriteit mapping
+    const priorityOrder = {
+        'Highest': 1,
+        'High': 2,
+        'Medium': 3,
+        'Low': 4,
+        'Lowest': 5
+    };
+
+    return [...issues].sort((a, b) => {
+        const statusA = a.fields?.status?.name || '';
+        const statusB = b.fields?.status?.name || '';
+        
+        // Eerst sorteren op status
+        if (statusPriority[statusA as keyof typeof statusPriority] !== statusPriority[statusB as keyof typeof statusPriority]) {
+            return (statusPriority[statusA as keyof typeof statusPriority] || 999) - (statusPriority[statusB as keyof typeof statusPriority] || 999);
+        }
+
+        // Voor Registered issues, eerst sorteren op aanwezigheid van opvolgers
+        if (statusA === 'Registered' && statusB === 'Registered') {
+            const hasSuccessorsA = getSuccessors(a).length > 0;
+            const hasSuccessorsB = getSuccessors(b).length > 0;
+            
+            if (hasSuccessorsA !== hasSuccessorsB) {
+                return hasSuccessorsA ? -1 : 1;
+            }
+            
+            // Als beide issues opvolgers hebben of beide niet, sorteren op prioriteit
+            const priorityA = a.fields?.priority?.name || '';
+            const priorityB = b.fields?.priority?.name || '';
+            
+            if (priorityOrder[priorityA as keyof typeof priorityOrder] !== priorityOrder[priorityB as keyof typeof priorityOrder]) {
+                return (priorityOrder[priorityA as keyof typeof priorityOrder] || 999) - (priorityOrder[priorityB as keyof typeof priorityOrder] || 999);
+            }
+
+            // Als prioriteit gelijk is, sorteren op naam van de toegewezen persoon
+            const assigneeA = a.fields?.assignee?.displayName || 'Niet toegewezen';
+            const assigneeB = b.fields?.assignee?.displayName || 'Niet toegewezen';
+            return assigneeA.localeCompare(assigneeB);
+        }
+
+        // Voor niet-Registered issues, sorteren op prioriteit
+        const priorityA = a.fields?.priority?.name || '';
+        const priorityB = b.fields?.priority?.name || '';
+        
+        if (priorityOrder[priorityA as keyof typeof priorityOrder] !== priorityOrder[priorityB as keyof typeof priorityOrder]) {
+            return (priorityOrder[priorityA as keyof typeof priorityOrder] || 999) - (priorityOrder[priorityB as keyof typeof priorityOrder] || 999);
+        }
+
+        // Als prioriteit gelijk is, sorteren op naam van de toegewezen persoon
+        const assigneeA = a.fields?.assignee?.displayName || 'Niet toegewezen';
+        const assigneeB = b.fields?.assignee?.displayName || 'Niet toegewezen';
+        return assigneeA.localeCompare(assigneeB);
+    });
+}
+
+function calculatePlanning(issues: Issue[], projectType: string, googleSheetsData: string[][] | null): { issue: Issue; sprint: number }[] {
+    const planning: { issue: Issue; sprint: number }[] = [];
+    const sprintCapacity = new Map<number, Map<string, number>>();
+    const sprintAssignments = new Map<number, Map<string, Issue[]>>();
+    const employeeHours = new Map<string, number>();
+    const employeeSprintHours = new Map<string, Map<number, number>>();
+
+    // Filter issues op basis van project type
+    const filteredIssues = issues.filter(issue => {
+        const issueType = issue.fields?.issuetype?.name?.toLowerCase() || '';
+        if (projectType === 'Development') {
+            return issueType === 'task' || issueType === 'bug';
+        } else if (projectType === 'Support') {
+            return issueType === 'incident' || issueType === 'problem';
+        }
+        return true;
+    });
+
+    // Sorteer issues volgens dezelfde logica als in de projecttabellen
+    const sortedIssues = sortIssues(filteredIssues);
+
+    // Initialiseer sprint capaciteit en assignments
+    for (let sprint = 1; sprint <= 10; sprint++) {
+        sprintCapacity.set(sprint, new Map<string, number>());
+        sprintAssignments.set(sprint, new Map<string, Issue[]>());
+    }
+
+    // Bereken beschikbare uren per medewerker per sprint
     if (googleSheetsData) {
-        googleSheetsData.slice(1).forEach(row => {
-            const name = row[2];
-            const effectiveHours = Number((parseFloat(row[6]) || 0).toFixed(1));
-            const projects = (row[7] || '').split(',').map(p => p.trim());
-            employeeDataMap.set(name, { hours: effectiveHours, projects });
+        googleSheetsData.slice(1).forEach((row: string[]) => {
+            const employee = row[2];
+            const effectiveHours = parseFloat(row[6]) || 0;
+            const sprintHours = effectiveHours * 2; // 2 weken per sprint
+
+            // Initialiseer employeeSprintHours voor deze medewerker
+            if (!employeeSprintHours.has(employee)) {
+                employeeSprintHours.set(employee, new Map<number, number>());
+            }
+
+            // Voor Peter van Diermen, verdeel de uren over alle sprints
+            if (employee === 'Peter van Diermen') {
+                for (let sprint = 1; sprint <= 10; sprint++) {
+                    const sprintMap = sprintCapacity.get(sprint);
+                    if (sprintMap) {
+                        sprintMap.set(employee, sprintHours);
+                    }
+                    const employeeMap = employeeSprintHours.get(employee);
+                    if (employeeMap) {
+                        employeeMap.set(sprint, sprintHours);
+                    }
+                }
+            } else {
+                // Voor andere medewerkers, gebruik de normale sprint capaciteit
+                for (let sprint = 1; sprint <= 10; sprint++) {
+                    const sprintMap = sprintCapacity.get(sprint);
+                    if (sprintMap) {
+                        sprintMap.set(employee, sprintHours);
+                    }
+                    const employeeMap = employeeSprintHours.get(employee);
+                    if (employeeMap) {
+                        employeeMap.set(sprint, sprintHours);
+                    }
+                }
+            }
         });
     }
 
-    // Filter issues op basis van projecten waar medewerkers op werken
-    const filteredIssues = issues.filter(issue => {
-        const assignee = issue.fields?.assignee?.displayName;
-        if (!assignee) return false;
-        
-        const employeeData = employeeDataMap.get(assignee);
-        if (!employeeData) return false;
-
-        // Voor Peter's issues, controleer of er medewerkers zijn die op het project kunnen werken
-        if (assignee === 'Peter van Diermen') {
-            const availableEmployees = Array.from(employeeDataMap.entries())
-                .filter(([name, data]) => 
-                    name !== 'Peter van Diermen' && 
-                    data.projects.includes(projectType === 'atlantis' ? 'Atlantis 7' : 'Subscriptions')
-                );
-            return availableEmployees.length > 0;
-        }
-
-        // Voor andere medewerkers, controleer of ze op het juiste project werken
-        return employeeData.projects.includes(projectType === 'atlantis' ? 'Atlantis 7' : 'Subscriptions');
-    });
-
-    // Sorteer issues op prioriteit (Highest -> High -> Medium -> Low)
-    const priorityOrder = ['Highest', 'High', 'Medium', 'Low'];
-    
-    // Bereid issues voor met prioriteit en opvolgers
-    const issuesWithPriority = filteredIssues.map(issue => ({
-        issue,
-        priority: priorityOrder.indexOf(issue.fields?.priority?.name || 'Low'),
-        hasSuccessors: getSuccessors(issue).length > 0,
-        hours: Number(((issue.fields?.timeestimate || 0) / 3600).toFixed(1)),
-        isActive: issue.fields?.status?.name === 'Open' || issue.fields?.status?.name === 'In review',
-        isWaiting: issue.fields?.status?.name === 'Waiting',
-        predecessors: getPredecessors(issue),
-        isPeterIssue: issue.fields?.assignee?.displayName === 'Peter van Diermen'
-    }));
-
-    // Sorteer issues op actieve status, prioriteit en opvolgers
-    issuesWithPriority.sort((a, b) => {
-        // Eerst op actieve status
-        if (a.isActive !== b.isActive) return b.isActive ? 1 : -1;
-        // Dan op opvolgers
-        if (a.hasSuccessors !== b.hasSuccessors) return b.hasSuccessors ? 1 : -1;
-        // Dan op prioriteit
-        if (a.priority !== b.priority) return a.priority - b.priority;
-        return a.issue.key.localeCompare(b.issue.key);
-    });
-
-    // Verdeel issues over sprints
-    const sprintPlanning: { issue: Issue; sprint: number }[] = [];
-    const sprintHours = new Map<number, Map<string, number>>(); // sprint -> medewerker -> uren
-    const maxSprints = 10; // Maximum aantal sprints om te voorkomen dat we oneindig doorlopen
-
-    // Initialiseer de eerste sprint
-    sprintHours.set(1, new Map<string, number>());
-
-    // Maak een map van issue keys naar hun sprint nummers
-    const issueSprintMap = new Map<string, number>();
-
-    // Eerst plannen we alle issues (inclusief Peter's issues)
-    for (const { issue, hours, isActive, isWaiting, predecessors, isPeterIssue } of issuesWithPriority) {
-        const assignee = issue.fields?.assignee?.displayName || 'Niet toegewezen';
-        const employeeHours = employeeDataMap.get(assignee)?.hours || 0;
-        const sprintCapacity = Number((employeeHours * 2).toFixed(1)); // 2 weken per sprint, afgerond op 1 decimaal
-
-        // Zoek de eerste sprint waar deze issue past
-        let assignedSprint = 1;
-        let foundSprint = false;
-
-        // Als het issue "Waiting" is, zoek de hoogste sprint van de voorgangers
-        if (isWaiting && predecessors.length > 0) {
-            const predecessorSprints = predecessors
-                .map(predKey => issueSprintMap.get(predKey))
-                .filter(sprint => sprint !== undefined);
-            
-            if (predecessorSprints.length > 0) {
-                assignedSprint = Math.max(...predecessorSprints) + 1;
-            }
-        }
-
-        // Controleer eerst de huidige sprint
-        const currentSprintHours = sprintHours.get(assignedSprint)!;
-        const currentEmployeeHours = Number((currentSprintHours.get(assignee) || 0).toFixed(1));
-
-        // Als er nog tijd over is in de huidige sprint, plaats het issue daar
-        if (currentEmployeeHours < sprintCapacity) {
-            // Controleer of het issue binnen de resterende beschikbare tijd past
-            const remainingCapacity = sprintCapacity - currentEmployeeHours;
-
-            if (hours <= remainingCapacity) {
-                // Update sprint uren
-                currentSprintHours.set(assignee, currentEmployeeHours + hours);
-                sprintHours.set(assignedSprint, currentSprintHours);
-                foundSprint = true;
-            } else {
-                // Zoek de volgende sprint
-                assignedSprint++;
-                while (assignedSprint <= maxSprints) {
-                    const sprintEmployeeHours = sprintHours.get(assignedSprint) || new Map<string, number>();
-                    const employeeHoursInSprint = sprintEmployeeHours.get(assignee) || 0;
-
-                    // Als er nog tijd over is in deze sprint, plaats het issue daar
-                    if (employeeHoursInSprint < sprintCapacity) {
-                        const remainingCapacity = sprintCapacity - employeeHoursInSprint;
-                        if (hours <= remainingCapacity) {
-                            // Update sprint uren
-                            sprintEmployeeHours.set(assignee, employeeHoursInSprint + hours);
-                            sprintHours.set(assignedSprint, sprintEmployeeHours);
-                            foundSprint = true;
-                            break;
-                        }
-                    }
-
-                    assignedSprint++;
-                }
-            }
-        } else {
-            // Zoek de volgende sprint
-            assignedSprint++;
-            while (assignedSprint <= maxSprints) {
-                const sprintEmployeeHours = sprintHours.get(assignedSprint) || new Map<string, number>();
-                const employeeHoursInSprint = sprintEmployeeHours.get(assignee) || 0;
-
-                // Als er nog tijd over is in deze sprint, plaats het issue daar
-                if (employeeHoursInSprint < sprintCapacity) {
-                    const remainingCapacity = sprintCapacity - employeeHoursInSprint;
-                    if (hours <= remainingCapacity) {
-                        // Update sprint uren
-                        sprintEmployeeHours.set(assignee, employeeHoursInSprint + hours);
-                        sprintHours.set(assignedSprint, sprintEmployeeHours);
-                        foundSprint = true;
-                        break;
-                    }
-                }
-
-                assignedSprint++;
-            }
-        }
-
-        if (!foundSprint) {
-            // Toewijzen aan laatste sprint als fallback
-            assignedSprint = maxSprints;
-        }
-
-        sprintPlanning.push({ issue, sprint: assignedSprint });
-        issueSprintMap.set(issue.key, assignedSprint);
+    // Helper functie om remaining time of estimated time te krijgen
+    function getIssueHours(issue: Issue): number {
+        const remainingTime = issue.fields?.timeestimate;
+        const estimatedTime = issue.fields?.timeoriginalestimate;
+        return Number(((remainingTime !== undefined && remainingTime !== 0 ? remainingTime : estimatedTime || 0) / 3600).toFixed(1));
     }
 
-    // Herverdeel Peter's issues over de beschikbare uren
-    const peterIssues = sprintPlanning.filter(({ issue }) => 
+    // Helper functie om te controleren of een issue aan een sprint kan worden toegewezen
+    function canAssignToSprint(issue: Issue, sprint: number, employee: string): boolean {
+        const issueHours = getIssueHours(issue);
+        const sprintMap = sprintCapacity.get(sprint);
+        const currentHours = sprintMap?.get(employee) || 0;
+        return currentHours >= issueHours;
+    }
+
+    // Helper functie om een issue aan een sprint toe te wijzen
+    function assignToSprint(issue: Issue, sprint: number, employee: string) {
+        const issueHours = getIssueHours(issue);
+        const sprintMap = sprintCapacity.get(sprint);
+        if (sprintMap) {
+            sprintMap.set(employee, (sprintMap.get(employee) || 0) - issueHours);
+        }
+        const sprintAssignmentsMap = sprintAssignments.get(sprint);
+        if (sprintAssignmentsMap) {
+            const employeeIssues = sprintAssignmentsMap.get(employee) || [];
+            employeeIssues.push(issue);
+            sprintAssignmentsMap.set(employee, employeeIssues);
+        }
+        planning.push({ issue, sprint });
+    }
+
+    // Verwerk eerst alle issues van andere medewerkers
+    for (const issue of sortedIssues) {
+        const assignee = issue.fields?.assignee?.displayName;
+        if (!assignee || assignee === 'Peter van Diermen') continue;
+
+        const issueHours = getIssueHours(issue);
+
+        // Voor andere medewerkers, gebruik de normale toewijzingslogica
+        let assigned = false;
+        for (let sprint = 1; sprint <= 10; sprint++) {
+            if (canAssignToSprint(issue, sprint, assignee)) {
+                assignToSprint(issue, sprint, assignee);
+                assigned = true;
+                break;
+            }
+        }
+
+        // Als er geen sprint beschikbaar is, wijs toe aan sprint 10
+        if (!assigned) {
+            assignToSprint(issue, 10, assignee);
+        }
+    }
+
+    // Bereken beschikbare uren per sprint voor Peter van Diermen
+    const peterSprintAvailableHours = new Map<number, number>();
+    
+    // Bereken eerst de beschikbare uren per sprint voor Peter
+    for (let sprint = 1; sprint <= 10; sprint++) {
+        let sprintTotalAvailable = 0;
+        let sprintTotalUsed = 0;
+        
+        // Bereken totaal beschikbare uren in de sprint
+        employeeSprintHours.forEach((sprintHours, employee) => {
+            if (employee === 'Peter van Diermen') return;
+            const hours = sprintHours.get(sprint);
+            if (typeof hours === 'number') {
+                sprintTotalAvailable += hours;
+            }
+        });
+        
+        // Bereken totaal gebruikte uren in de sprint
+        sprintCapacity.forEach((sprintMap, sprintNum) => {
+            sprintMap.forEach((remainingHours, employee) => {
+                if (employee === 'Peter van Diermen') return;
+                const employeeHours = employeeSprintHours.get(employee);
+                if (employeeHours) {
+                    const originalHours = employeeHours.get(sprintNum) || 0;
+                    if (typeof originalHours === 'number' && typeof remainingHours === 'number') {
+                        sprintTotalUsed += originalHours - remainingHours;
+                    }
+                }
+            });
+        });
+        
+        // Beschikbare uren voor Peter is het totaal aantal uren dat over is in de sprint
+        const availableForPeter = Number((sprintTotalAvailable - sprintTotalUsed).toFixed(1));
+        peterSprintAvailableHours.set(sprint, availableForPeter);
+        
+        // Update de sprint capaciteit voor Peter
+        const sprintMap = sprintCapacity.get(sprint);
+        if (sprintMap) {
+            sprintMap.set('Peter van Diermen', availableForPeter);
+        }
+    }
+
+    // Verzamel alle issues van Peter van Diermen
+    const peterIssues = sortedIssues.filter(issue => 
         issue.fields?.assignee?.displayName === 'Peter van Diermen'
     );
-    
-    for (const { issue } of peterIssues) {
-        const hours = Number(((issue.fields?.timeestimate || 0) / 3600).toFixed(1));
 
-        // Zoek een sprint met voldoende beschikbare uren
-        let foundSprint = false;
-        for (let targetSprint = 1; targetSprint <= maxSprints; targetSprint++) {
-            const sprintEmployeeHours = sprintHours.get(targetSprint) || new Map<string, number>();
-            let totalAvailableHours = 0;
-            const availableHoursPerPerson = new Map<string, number>();
+    // Verdeel Peter's issues over de sprints
+    for (const issue of peterIssues) {
+        const issueHours = getIssueHours(issue);
 
-            // Bereken beschikbare uren per persoon, alleen voor medewerkers die op het project kunnen werken
-            for (const [assignee, employeeData] of employeeDataMap.entries()) {
-                if (assignee === 'Peter van Diermen') continue;
-                if (!employeeData.projects.includes(projectType === 'atlantis' ? 'Atlantis 7' : 'Subscriptions')) continue;
+        // Probeer het issue in één sprint te plaatsen als er voldoende capaciteit is
+        let assigned = false;
+        for (let sprint = 1; sprint <= 10; sprint++) {
+            const availableHours = peterSprintAvailableHours.get(sprint) || 0;
+            
+            if (availableHours >= issueHours) {
+                assignToSprint(issue, sprint, 'Peter van Diermen');
+                peterSprintAvailableHours.set(sprint, availableHours - issueHours);
+                assigned = true;
+                break;
+            }
+        }
 
-                const sprintCapacity = Number((employeeData.hours * 2).toFixed(1));
-                const usedHours = Number((sprintEmployeeHours.get(assignee) || 0).toFixed(1));
-                const availableHours = Number((Math.max(0, sprintCapacity - usedHours)).toFixed(1));
-                availableHoursPerPerson.set(assignee, availableHours);
-                totalAvailableHours = Number((totalAvailableHours + availableHours).toFixed(1));
+        // Als het issue niet in één sprint past, verdeel het over meerdere sprints
+        if (!assigned) {
+            let remainingHours = issueHours;
+            let currentSprint = 1;
+
+            while (remainingHours > 0 && currentSprint <= 10) {
+                const availableHours = peterSprintAvailableHours.get(currentSprint) || 0;
+
+                if (availableHours > 0) {
+                    const hoursToAssign = Math.min(remainingHours, availableHours);
+                    // Maak een kopie van het issue met aangepaste uren
+                    const issueCopy = {
+                        ...issue,
+                        fields: {
+                            ...issue.fields,
+                            timeestimate: hoursToAssign * 3600,
+                            timeoriginalestimate: hoursToAssign * 3600
+                        }
+                    };
+                    assignToSprint(issueCopy, currentSprint, 'Peter van Diermen');
+                    peterSprintAvailableHours.set(currentSprint, availableHours - hoursToAssign);
+                    remainingHours -= hoursToAssign;
+                }
+                currentSprint++;
             }
 
-            // Als er genoeg uren beschikbaar zijn, verplaats het issue
-            if (totalAvailableHours >= hours) {
-                // Verdeel de uren over de beschikbare medewerkers
-                let remainingHours = hours;
-                const newSprintHours = new Map(sprintEmployeeHours);
-
-                // Probeer eerst de uren te verdelen over medewerkers met de meeste beschikbare uren
-                const sortedAssignees = Array.from(availableHoursPerPerson.entries())
-                    .sort((a, b) => b[1] - a[1]);
-
-                for (const [assignee, availableHours] of sortedAssignees) {
-                    if (remainingHours > 0 && availableHours > 0) {
-                        const hoursToAssign = Number((Math.min(remainingHours, availableHours)).toFixed(1));
-                        const currentUsedHours = Number((newSprintHours.get(assignee) || 0).toFixed(1));
-                        const sprintCapacity = Number((employeeDataMap.get(assignee)!.hours * 2).toFixed(1));
-                        
-                        // Controleer of de toewijzing de sprint capaciteit niet overschrijdt
-                        if (Number((currentUsedHours + hoursToAssign).toFixed(1)) <= sprintCapacity) {
-                            newSprintHours.set(assignee, Number((currentUsedHours + hoursToAssign).toFixed(1)));
-                            remainingHours = Number((remainingHours - hoursToAssign).toFixed(1));
-                        }
+            // Als er nog uren over zijn, wijs ze toe aan de laatste sprint
+            if (remainingHours > 0) {
+                const issueCopy = {
+                    ...issue,
+                    fields: {
+                        ...issue.fields,
+                        timeestimate: remainingHours * 3600,
+                        timeoriginalestimate: remainingHours * 3600
                     }
-                }
-
-                // Alleen als alle uren zijn toegewezen, update de sprint uren
-                if (remainingHours === 0) {
-                    sprintHours.set(targetSprint, newSprintHours);
-                    
-                    // Update de planning
-                    const planningIndex = sprintPlanning.findIndex(p => p.issue.key === issue.key);
-                    if (planningIndex !== -1) {
-                        sprintPlanning[planningIndex].sprint = targetSprint;
-                        issueSprintMap.set(issue.key, targetSprint);
-                        foundSprint = true;
-                        break;
-                    }
-                }
+                };
+                assignToSprint(issueCopy, 10, 'Peter van Diermen');
             }
         }
     }
 
-    return sprintPlanning;
+    return planning;
 }
 
 function getSprintName(issue: Issue): string {
-    const sprints = issue.fields.customfield_10020;
+    const sprints = issue.fields?.customfield_10020;
     if (!sprints || sprints.length === 0) {
         return 'Niet gepland';
     }
@@ -692,16 +770,6 @@ function getAvailableHoursForProject(googleSheetsData: string[][] | null, projec
     return Number(totalHours.toFixed(1)); // Rond eindtotaal af op 1 decimaal
 }
 
-interface WorkLog {
-    issueKey: string;
-    issueSummary: string;
-    author: string;
-    timeSpentSeconds: number;
-    started: string;
-    comment?: string;
-    estimatedTime: number;
-}
-
 function generateHtml(issues: Issue[], googleSheetsData: string[][] | null, workLogs: WorkLog[], sprintNames: Map<string, string>): string {
     // Splits issues in projecten
     const subscriptionIssues = issues.filter(issue => {
@@ -715,8 +783,8 @@ function generateHtml(issues: Issue[], googleSheetsData: string[][] | null, work
     });
 
     // Bereken planning voor beide projecten
-    const subscriptionPlanning = calculatePlanning(subscriptionIssues, googleSheetsData, 'subscription');
-    const atlantisPlanning = calculatePlanning(atlantisIssues, googleSheetsData, 'atlantis');
+    const subscriptionPlanning = calculatePlanning(subscriptionIssues, 'subscription', googleSheetsData);
+    const atlantisPlanning = calculatePlanning(atlantisIssues, 'atlantis', googleSheetsData);
 
     // Styles voor de pagina
     const styles = `
@@ -753,20 +821,44 @@ function generateHtml(issues: Issue[], googleSheetsData: string[][] | null, work
                                     <th>Issue</th>
                                     <th>Samenvatting</th>
                                     <th>Status</th>
+                                    <th>Prioriteit</th>
                                     <th>Toegewezen aan</th>
                                     <th>Uren</th>
+                                    <th>Opvolgers</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                ${subscriptionIssues.map(issue => `
-                                    <tr>
-                                        <td>${issue.key}</td>
-                                        <td>${issue.fields?.summary}</td>
-                                        <td>${issue.fields?.status?.name}</td>
-                                        <td>${issue.fields?.assignee?.displayName || 'Niet toegewezen'}</td>
-                                        <td>${formatTime(issue.fields?.timeestimate)}</td>
-                                    </tr>
-                                `).join('')}
+                                ${sortIssues(subscriptionIssues.filter(issue => issue.fields?.status?.name !== 'Ready for testing')).map(issue => {
+                                    // Haal opvolgers op
+                                    const successors = getSuccessors(issue);
+                                    const successorsHtml = successors.length > 0 
+                                        ? successors.map(key => `<a href="https://deventit.atlassian.net/browse/${key}" target="_blank">${key}</a>`).join(', ')
+                                        : 'Geen';
+                                    
+                                    // Gebruik remaining time (timeestimate) of toon '-' als deze niet beschikbaar is
+                                    const remainingTime = issue.fields?.timeestimate;
+                                    
+                                    return `
+                                        <tr>
+                                            <td>${issue.key}</td>
+                                            <td>${issue.fields?.summary}</td>
+                                            <td>${issue.fields?.status?.name}</td>
+                                            <td>${issue.fields?.priority?.name || 'Geen'}</td>
+                                            <td>${issue.fields?.assignee?.displayName || 'Niet toegewezen'}</td>
+                                            <td>${formatTime(remainingTime)}</td>
+                                            <td>${successorsHtml}</td>
+                                        </tr>
+                                    `;
+                                }).join('')}
+                                <tr class="table-dark">
+                                    <td colspan="5"><strong>Totaal</strong></td>
+                                    <td><strong>${formatTime(subscriptionIssues.filter(issue => issue.fields?.status?.name !== 'Ready for testing').reduce((sum, issue) => {
+                                        // Gebruik remaining time (timeestimate) of 0 als deze niet beschikbaar is
+                                        const remainingTime = issue.fields?.timeestimate || 0;
+                                        return sum + remainingTime;
+                                    }, 0))}</strong></td>
+                                    <td></td>
+                                </tr>
                             </tbody>
                         </table>
                     </div>
@@ -778,20 +870,44 @@ function generateHtml(issues: Issue[], googleSheetsData: string[][] | null, work
                                     <th>Issue</th>
                                     <th>Samenvatting</th>
                                     <th>Status</th>
+                                    <th>Prioriteit</th>
                                     <th>Toegewezen aan</th>
                                     <th>Uren</th>
+                                    <th>Opvolgers</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                ${atlantisIssues.map(issue => `
-                                    <tr>
-                                        <td>${issue.key}</td>
-                                        <td>${issue.fields?.summary}</td>
-                                        <td>${issue.fields?.status?.name}</td>
-                                        <td>${issue.fields?.assignee?.displayName || 'Niet toegewezen'}</td>
-                                        <td>${formatTime(issue.fields?.timeestimate)}</td>
-                                    </tr>
-                                `).join('')}
+                                ${sortIssues(atlantisIssues.filter(issue => issue.fields?.status?.name !== 'Ready for testing')).map(issue => {
+                                    // Haal opvolgers op
+                                    const successors = getSuccessors(issue);
+                                    const successorsHtml = successors.length > 0 
+                                        ? successors.map(key => `<a href="https://deventit.atlassian.net/browse/${key}" target="_blank">${key}</a>`).join(', ')
+                                        : 'Geen';
+                                    
+                                    // Gebruik remaining time (timeestimate) of toon '-' als deze niet beschikbaar is
+                                    const remainingTime = issue.fields?.timeestimate;
+                                    
+                                    return `
+                                        <tr>
+                                            <td>${issue.key}</td>
+                                            <td>${issue.fields?.summary}</td>
+                                            <td>${issue.fields?.status?.name}</td>
+                                            <td>${issue.fields?.priority?.name || 'Geen'}</td>
+                                            <td>${issue.fields?.assignee?.displayName || 'Niet toegewezen'}</td>
+                                            <td>${formatTime(remainingTime)}</td>
+                                            <td>${successorsHtml}</td>
+                                        </tr>
+                                    `;
+                                }).join('')}
+                                <tr class="table-dark">
+                                    <td colspan="5"><strong>Totaal</strong></td>
+                                    <td><strong>${formatTime(atlantisIssues.filter(issue => issue.fields?.status?.name !== 'Ready for testing').reduce((sum, issue) => {
+                                        // Gebruik remaining time (timeestimate) of 0 als deze niet beschikbaar is
+                                        const remainingTime = issue.fields?.timeestimate || 0;
+                                        return sum + remainingTime;
+                                    }, 0))}</strong></td>
+                                    <td></td>
+                                </tr>
                             </tbody>
                         </table>
                     </div>
@@ -810,11 +926,11 @@ function generateHtml(issues: Issue[], googleSheetsData: string[][] | null, work
                 <div class="row">
                     <div class="col-md-6">
                         <h3>Subscriptions</h3>
-                        ${generateSprintHoursTable(subscriptionPlanning, 'Subscriptions')}
+                        ${generateSprintHoursTable(subscriptionPlanning, 'Subscriptions', googleSheetsData)}
                     </div>
                     <div class="col-md-6">
                         <h3>Atlantis 7</h3>
-                        ${generateSprintHoursTable(atlantisPlanning, 'Atlantis')}
+                        ${generateSprintHoursTable(atlantisPlanning, 'Atlantis', googleSheetsData)}
                     </div>
                 </div>
             </div>
@@ -848,7 +964,7 @@ function generateHtml(issues: Issue[], googleSheetsData: string[][] | null, work
     `;
 }
 
-function generateSprintHoursTable(planning: { issue: Issue; sprint: number }[], projectType: string): string {
+function generateSprintHoursTable(planning: { issue: Issue; sprint: number }[], projectType: string, googleSheetsData: string[][] | null): string {
     const sprintHoursMap = new Map<number, Map<string, number>>();
     const sprintNames = new Map<number, string>();
     const sprintAssignments = new Map<number, Map<string, Issue[]>>();
@@ -860,17 +976,24 @@ function generateSprintHoursTable(planning: { issue: Issue; sprint: number }[], 
     // Initialiseer de maps voor elke sprint
     uniqueSprints.forEach(sprint => {
         sprintHoursMap.set(sprint, new Map());
-        sprintAssignments.set(sprint, new Map());
+        sprintAssignments.set(sprint, new Map<string, Issue[]>());
         uniqueEmployees.forEach(employee => {
             sprintHoursMap.get(sprint)?.set(employee, 0);
             sprintAssignments.get(sprint)?.set(employee, []);
         });
     });
 
+    // Helper functie om remaining time of estimated time te krijgen
+    function getIssueHours(issue: Issue): number {
+        const remainingTime = issue.fields?.timeestimate;
+        const estimatedTime = issue.fields?.timeoriginalestimate;
+        return Number(((remainingTime !== undefined && remainingTime !== 0 ? remainingTime : estimatedTime || 0) / 3600).toFixed(1));
+    }
+
     // Vul de uren en assignments in
     planning.forEach(({ issue, sprint }) => {
         const assignee = issue.fields?.assignee?.displayName || 'Niet toegewezen';
-        const hours = Number(((issue.fields?.timeestimate || 0) / 3600).toFixed(1));
+        const hours = getIssueHours(issue);
         
         const sprintMap = sprintHoursMap.get(sprint);
         if (sprintMap) {
@@ -885,69 +1008,132 @@ function generateSprintHoursTable(planning: { issue: Issue; sprint: number }[], 
         }
     });
 
+    // Verzamel alle unieke medewerkers en sorteer ze alfabetisch
+    const uniqueEmployeesSprint = new Set<string>();
+    planning.forEach(p => {
+        if (p.issue.fields?.assignee?.displayName) {
+            uniqueEmployeesSprint.add(p.issue.fields?.assignee?.displayName);
+        }
+    });
+    const sortedEmployeesSprint = Array.from(uniqueEmployeesSprint).sort((a, b) => a.localeCompare(b));
+
     // Genereer de HTML tabel
-    return `
+    let sprintTable = `
         <h2>Uren per Sprint ${projectType}</h2>
         <table class="table">
             <thead>
                 <tr>
                     <th>Sprint</th>
                     <th>Medewerker</th>
-                    <th>Gebruikte uren</th>
+                    <th>Beschikbaar</th>
+                    <th>Gebruikt</th>
+                    <th>Over</th>
                     <th>Issues</th>
                 </tr>
             </thead>
             <tbody>
-                ${Array.from(uniqueSprints).sort((a, b) => a - b).map(sprint => `
-                    ${Array.from(uniqueEmployees).map(person => {
-                        const hours = sprintHoursMap.get(sprint)?.get(person) || 0;
-                        const issues = sprintAssignments.get(sprint)?.get(person) || [];
-                        
-                        // Haal issues op voor deze sprint en persoon
-                        const sprintIssues = planning
-                            .filter(p => p.sprint === sprint && p.issue.fields?.assignee?.displayName === person)
-                            .map(p => ({
-                                key: p.issue.key,
-                                hours: Number(((p.issue.fields?.timeestimate || 0) / 3600).toFixed(1))
-                            }));
-
-                        return `
-                            <tr>
-                                <td>Sprint ${sprint}</td>
-                                <td>${person}</td>
-                                <td>${hours.toFixed(1)}</td>
-                                <td>
-                                    ${sprintIssues.map(issue => 
-                                        `<div><a href="https://deventit.atlassian.net/browse/${issue.key}" target="_blank">${issue.key}</a> (${issue.hours} uur)</div>`
-                                    ).join('')}
-                                </td>
-                            </tr>
-                        `;
-                    }).join('')}
-                `).join('')}
+                ${sortedEmployeesSprint.map(employee => {
+                    const employeeLogs = planning.filter(p => p.issue.fields?.assignee?.displayName === employee);
+                    const totalAvailable = employeeLogs.reduce((sum, p) => sum + getIssueHours(p.issue), 0);
+                    const totalUsed = employeeLogs.reduce((sum, p) => sum + getIssueHours(p.issue), 0);
+                    const totalRemaining = totalAvailable - totalUsed;
+                    const issues = employeeLogs.map(p => ({
+                        key: p.issue.key,
+                        hours: getIssueHours(p.issue)
+                    }));
+                    return `
+                        <tr>
+                            <td>Sprint ${employeeLogs[0]?.sprint || 'Niet gepland'}</td>
+                            <td>${employee}</td>
+                            <td>${totalAvailable.toFixed(1)}</td>
+                            <td>${totalUsed.toFixed(1)}</td>
+                            <td>${totalRemaining.toFixed(1)}</td>
+                            <td>
+                                ${issues.map(issue => 
+                                    `<div><a href="https://deventit.atlassian.net/browse/${issue.key}" target="_blank">${issue.key}</a> (${issue.hours} uur)</div>`
+                                ).join('')}
+                            </td>
+                        </tr>
+                    `;
+                }).join('')}
             </tbody>
         </table>
     `;
+
+    return sprintTable;
 }
+
+interface PlanningIssue {
+    key: string;
+    fields?: {
+        summary?: string;
+        status?: {
+            name: string;
+        };
+        assignee?: {
+            displayName: string;
+        };
+        timeestimate?: number;
+    };
+}
+
+type PlanningResult = Record<string, PlanningIssue[]>;
 
 // Planning endpoint
 app.get('/api/planning', async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const planning = await getPlanning();
+        const planning = await getPlanning() as unknown as PlanningResult;
         if (!planning) {
-            const error = new Error('Geen planning data ontvangen') as any;
-            error.statusCode = 404;
-            throw error;
+            return res.status(404).send(`
+                <div class="alert alert-danger">
+                    Geen planning data ontvangen.
+                </div>
+            `);
         }
-        res.json(planning);
+
+        // Genereer HTML voor planning tabel
+        const planningHtml = `
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Sprint</th>
+                        <th>Issue</th>
+                        <th>Samenvatting</th>
+                        <th>Status</th>
+                        <th>Toegewezen aan</th>
+                        <th>Uren</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${Object.entries(planning).map(([sprint, issues]) => 
+                        issues.map((issue: PlanningIssue) => `
+                            <tr>
+                                <td>Sprint ${sprint}</td>
+                                <td><a href="https://${JIRA_DOMAIN}/browse/${issue.key}" target="_blank">${issue.key}</a></td>
+                                <td>${issue.fields?.summary || ''}</td>
+                                <td>${issue.fields?.status?.name || ''}</td>
+                                <td>${issue.fields?.assignee?.displayName || 'Niet toegewezen'}</td>
+                                <td>${formatTime(issue.fields?.timeestimate)}</td>
+                            </tr>
+                        `).join('')
+                    ).join('')}
+                </tbody>
+            </table>
+        `;
+
+        res.send(planningHtml);
     } catch (error: any) {
-        console.error(`Error bij ophalen planning: ${JSON.stringify(error)}`);
-        next(error);
+        logger.error(`Error bij ophalen planning: ${error}`);
+        res.status(500).send(`
+            <div class="alert alert-danger">
+                Er is een fout opgetreden bij het ophalen van de planning: ${error.message || error}
+            </div>
+        `);
     }
 });
 
 // Worklogs endpoint
-app.get('/api/worklogs', async (req, res) => {
+app.get('/api/worklogs', async (req: Request, res: Response) => {
     try {
         const { startDate, endDate } = req.query;
         
@@ -960,97 +1146,172 @@ app.get('/api/worklogs', async (req, res) => {
         }
 
         // Haal worklogs op van Jira
-        const workLogsResponse = await getWorkLogs(startDate as string, endDate as string) as WorkLogsResponse;
+        const workLogsResponse = await getWorkLogs(startDate as string, endDate as string);
         
-        // Haal actieve issues op voor de samenvattingen
-        const issues = await getActiveIssues();
-        
-        // Bereken efficiëntie
-        const efficiencyTable = calculateEfficiency(issues, workLogsResponse.workLogs, new Date(startDate as string), new Date(endDate as string));
-        
-        // Groepeer worklogs per medewerker
-        const workLogsByEmployee = new Map<string, WorkLog[]>();
+        // Log worklogs data in een leesbaar formaat
+        logger.log('Worklogs data:');
         workLogsResponse.workLogs.forEach(log => {
-            const logs = workLogsByEmployee.get(log.author) || [];
-            logs.push(log);
-            workLogsByEmployee.set(log.author, logs);
+            logger.log(`- ${log.author}: ${log.issueKey} (${(log.timeSpentSeconds / 3600).toFixed(1)} uur)`);
+        });
+        
+        logger.log('Efficiency data:');
+        workLogsResponse.efficiencyTable.forEach(row => {
+            logger.log(`- ${row.assignee}: ${row.efficiency}% efficiëntie`);
+        });
+        
+        // Haal alle issues op voor de efficiency tabel
+        const closedIssuesJql = `project = ${process.env.JIRA_PROJECT} AND status = Closed AND status CHANGED TO Closed AFTER "${startDate}" AND status CHANGED TO Closed BEFORE "${endDate}" ORDER BY updated DESC`;
+        
+        const closedIssuesResponse = await jiraClient.get('/search', {
+            params: {
+                jql: closedIssuesJql,
+                fields: ['summary', 'timetracking', 'assignee', 'status', 'timeestimate', 'timeoriginalestimate', 'worklog'],
+                expand: ['changelog', 'worklog'],
+                maxResults: 1000
+            }
         });
 
-        // Genereer HTML tabel voor worklogs
-        const workLogsTable = `
-            <div class="worklogs-container">
-                <h3>Worklogs van ${new Date(startDate as string).toLocaleDateString('nl-NL')} tot ${new Date(endDate as string).toLocaleDateString('nl-NL')}</h3>
-                <table class="table">
-                    <thead>
-                        <tr>
-                            <th>Medewerker</th>
-                            <th>Niet gewerkt (EET-3561)</th>
-                            <th>Niet op issues (EET-3560)</th>
-                            <th>Ontwikkeling</th>
-                            <th>Totaal</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${(() => {
-                            let totalNietGewerkt = 0;
-                            let totalNietOpIssues = 0;
-                            let totalOntwikkeling = 0;
-                            let totalTotaal = 0;
+        const closedIssues = closedIssuesResponse.data.issues || [];
+        
+        // Filter worklogs op basis van de geselecteerde periode
+        const filteredWorklogs = workLogsResponse.workLogs.filter(log => {
+            const logDate = new Date(log.started);
+            return logDate >= new Date(startDate as string) && logDate <= new Date(endDate as string);
+        });
+        
+        // Bereken efficiëntie
+        const efficiencyTable = calculateEfficiency(closedIssues, filteredWorklogs, new Date(startDate as string), new Date(endDate as string));
+        
+        // Verzamel alle unieke medewerkers en sorteer ze alfabetisch
+        const uniqueEmployees = new Set(workLogsResponse.workLogs.map(log => log.author));
+        const sortedEmployees = Array.from(uniqueEmployees).sort((a, b) => a.localeCompare(b));
 
-                            const rows = Array.from(workLogsByEmployee.entries()).map(([employee, logs]) => {
-                                // Groepeer logs per categorie
-                                const nietGewerkt = logs.filter(log => log.issueKey === 'EET-3561');
-                                const nietOpIssues = logs.filter(log => log.issueKey === 'EET-3560');
-                                const ontwikkeling = logs.filter(log => log.issueKey !== 'EET-3561' && log.issueKey !== 'EET-3560');
-
-                                // Bereken totale uren per categorie
-                                const nietGewerktUren = nietGewerkt.reduce((sum, log) => sum + log.timeSpentSeconds, 0) / 3600;
-                                const nietOpIssuesUren = nietOpIssues.reduce((sum, log) => sum + log.timeSpentSeconds, 0) / 3600;
-                                const ontwikkelingUren = ontwikkeling.reduce((sum, log) => sum + log.timeSpentSeconds, 0) / 3600;
-                                const rowTotal = Number((nietGewerktUren + nietOpIssuesUren + ontwikkelingUren).toFixed(1));
-
-                                // Update totalen
-                                totalNietGewerkt = Number((totalNietGewerkt + nietGewerktUren).toFixed(1));
-                                totalNietOpIssues = Number((totalNietOpIssues + nietOpIssuesUren).toFixed(1));
-                                totalOntwikkeling = Number((totalOntwikkeling + ontwikkelingUren).toFixed(1));
-                                totalTotaal = Number((totalTotaal + rowTotal).toFixed(1));
-
-                                return `
-                                    <tr>
-                                        <td>${employee}</td>
-                                        <td>${nietGewerktUren.toFixed(1)} uur</td>
-                                        <td>${nietOpIssuesUren.toFixed(1)} uur</td>
-                                        <td>${ontwikkelingUren.toFixed(1)} uur</td>
-                                        <td>${rowTotal.toFixed(1)} uur</td>
-                                    </tr>
-                                `;
-                            }).join('');
-
-                            // Voeg totalen rij toe
-                            const totalsRow = `
-                                <tr class="table-dark">
-                                    <td><strong>Totaal</strong></td>
-                                    <td><strong>${totalNietGewerkt.toFixed(1)} uur</strong></td>
-                                    <td><strong>${totalNietOpIssues.toFixed(1)} uur</strong></td>
-                                    <td><strong>${totalOntwikkeling.toFixed(1)} uur</strong></td>
-                                    <td><strong>${totalTotaal.toFixed(1)} uur</strong></td>
-                                </tr>
-                            `;
-
-                            return rows + totalsRow;
-                        })()}
-                    </tbody>
-                </table>
-                ${efficiencyTable}
-            </div>
+        // Genereer HTML voor worklogs tabel
+        const worklogsHtml = `
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Medewerker</th>
+                        <th>Niet gewerkt</th>
+                        <th>Niet op issues</th>
+                        <th>Ontwikkeling</th>
+                        <th>Totaal</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${sortedEmployees.map(author => {
+                        const authorLogs = workLogsResponse.workLogs.filter(log => log.author === author);
+                        const nietGewerkt = authorLogs
+                            .filter(log => log.issueKey === 'EET-3561')
+                            .reduce((sum, log) => sum + log.timeSpentSeconds / 3600, 0);
+                        const nietOpIssues = authorLogs
+                            .filter(log => log.issueKey === 'EET-3560')
+                            .reduce((sum, log) => sum + log.timeSpentSeconds / 3600, 0);
+                        const ontwikkeling = authorLogs
+                            .filter(log => log.issueKey !== 'EET-3561' && log.issueKey !== 'EET-3560')
+                            .reduce((sum, log) => sum + log.timeSpentSeconds / 3600, 0);
+                        const totaal = nietGewerkt + nietOpIssues + ontwikkeling;
+                        
+                        return `
+                            <tr>
+                                <td>${author}</td>
+                                <td>${nietGewerkt.toFixed(1)}</td>
+                                <td>${nietOpIssues.toFixed(1)}</td>
+                                <td>${ontwikkeling.toFixed(1)}</td>
+                                <td>${totaal.toFixed(1)}</td>
+                            </tr>
+                        `;
+                    }).join('')}
+                    ${(() => {
+                        const totalNietGewerkt = workLogsResponse.workLogs
+                            .filter(log => log.issueKey === 'EET-3561')
+                            .reduce((sum, log) => sum + log.timeSpentSeconds / 3600, 0);
+                        const totalNietOpIssues = workLogsResponse.workLogs
+                            .filter(log => log.issueKey === 'EET-3560')
+                            .reduce((sum, log) => sum + log.timeSpentSeconds / 3600, 0);
+                        const totalOntwikkeling = workLogsResponse.workLogs
+                            .filter(log => log.issueKey !== 'EET-3561' && log.issueKey !== 'EET-3560')
+                            .reduce((sum, log) => sum + log.timeSpentSeconds / 3600, 0);
+                        const totalTotaal = totalNietGewerkt + totalNietOpIssues + totalOntwikkeling;
+                        
+                        return `
+                            <tr class="table-primary fw-bold">
+                                <td>Totaal</td>
+                                <td>${totalNietGewerkt.toFixed(1)}</td>
+                                <td>${totalNietOpIssues.toFixed(1)}</td>
+                                <td>${totalOntwikkeling.toFixed(1)}</td>
+                                <td>${totalTotaal.toFixed(1)}</td>
+                            </tr>
+                        `;
+                    })()}
+                </tbody>
+            </table>
         `;
 
-        res.send(workLogsTable);
-    } catch (error) {
-        console.error('Error fetching worklogs:', error);
+        // Verzamel alle unieke medewerkers en sorteer ze alfabetisch voor de efficiency tabel
+        const uniqueEmployeesEfficiency = new Set<string>();
+        workLogsResponse.efficiencyTable.forEach(log => {
+            if (log.assignee) uniqueEmployeesEfficiency.add(log.assignee);
+        });
+        const sortedEmployeesEfficiency = Array.from(uniqueEmployeesEfficiency).sort((a, b) => a.localeCompare(b));
+
+        // Genereer de efficiency tabel
+        let efficiencyTableHtml = `
+            <h3>Efficiëntie</h3>
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Medewerker</th>
+                        <th>Geschat</th>
+                        <th>Gelogd</th>
+                        <th>Efficiëntie</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${sortedEmployeesEfficiency.map(employee => {
+                        const employeeLogs = workLogsResponse.efficiencyTable.filter(log => log.assignee === employee);
+                        const totalEstimated = employeeLogs.reduce((sum, log) => sum + parseFloat(log.estimated), 0);
+                        const totalLogged = employeeLogs.reduce((sum, log) => sum + parseFloat(log.logged), 0);
+                        const totalEfficiency = totalEstimated > 0 ? ((totalLogged / totalEstimated) * 100).toFixed(1) : '0.0';
+                        
+                        return `
+                            <tr>
+                                <td>${employee}</td>
+                                <td>${totalEstimated.toFixed(1)}</td>
+                                <td>${totalLogged.toFixed(1)}</td>
+                                <td>${totalEfficiency}%</td>
+                            </tr>
+                        `;
+                    }).join('')}
+                    ${(() => {
+                        const totalEstimated = workLogsResponse.efficiencyTable.reduce((sum, log) => sum + parseFloat(log.estimated), 0);
+                        const totalLogged = workLogsResponse.efficiencyTable.reduce((sum, log) => sum + parseFloat(log.logged), 0);
+                        const totalEfficiency = totalEstimated > 0 ? ((totalLogged / totalEstimated) * 100).toFixed(1) : '0.0';
+                        
+                        return `
+                            <tr class="table-primary fw-bold">
+                                <td>Totaal</td>
+                                <td>${totalEstimated.toFixed(1)}</td>
+                                <td>${totalLogged.toFixed(1)}</td>
+                                <td>${totalEfficiency}%</td>
+                            </tr>
+                        `;
+                    })()}
+                </tbody>
+            </table>
+        `;
+
+        res.send(`
+            <div class="worklogs-container">
+                ${worklogsHtml}
+                ${efficiencyTableHtml}
+            </div>
+        `);
+    } catch (error: any) {
+        logger.error(`Error in /api/worklogs endpoint: ${error}`);
         res.status(500).send(`
             <div class="alert alert-danger">
-                Er is een fout opgetreden bij het ophalen van de worklogs.
+                Er is een fout opgetreden bij het ophalen van de worklogs: ${error.message || error}
             </div>
         `);
     }
@@ -1059,20 +1320,25 @@ app.get('/api/worklogs', async (req, res) => {
 // Error handling middleware
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
     console.error(`Server error: ${err}`);
-    res.status(500).json({ error: 'Er is een interne serverfout opgetreden' });
+    res.status(500).send(`
+        <div class="alert alert-danger">
+            Er is een interne serverfout opgetreden: ${err.message || err}
+        </div>
+    `);
 });
 
 // Unhandled promise rejection handler
 process.on('unhandledRejection', (reason: unknown) => {
-    console.error(`Unhandled Rejection: ${reason}`);
-    // Voorkom dat de server crasht bij een unhandled rejection
-    // In plaats daarvan loggen we de error en gaan we door
+    console.error('Unhandled Rejection:', reason);
+    if (reason instanceof Error) {
+        console.error('Stack trace:', reason.stack);
+    }
 });
 
 // Uncaught exception handler
 process.on('uncaughtException', (error: Error) => {
-    console.error(`Unhandled Exception: ${error.message}`);
-    // Bij een uncaught exception sluiten we de server netjes af
+    console.error('Unhandled Exception:', error.message);
+    console.error('Stack trace:', error.stack);
     process.exit(1);
 });
 
@@ -1080,8 +1346,11 @@ process.on('uncaughtException', (error: Error) => {
 try {
     app.listen(port, () => {
         console.log(`Server draait op poort ${port}`);
+    }).on('error', (error) => {
+        console.error(`Error bij starten van server: ${error}`);
+        process.exit(1);
     });
 } catch (error) {
     console.error(`Error bij starten van server: ${error}`);
     process.exit(1);
-} 
+}

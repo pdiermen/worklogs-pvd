@@ -27,9 +27,10 @@ export interface Sprint {
 
 export interface Issue {
     key: string;
-    fields: {
+    fields?: {
         summary?: string;
         timeestimate?: number;
+        timeoriginalestimate?: number;
         status?: {
             name: string;
         };
@@ -47,6 +48,16 @@ export interface Issue {
             key: string;
         };
         customfield_10020?: Sprint[];
+        worklog?: {
+            worklogs: Array<{
+                author: {
+                    displayName: string;
+                };
+                timeSpentSeconds: number;
+                started: string;
+                comment?: string;
+            }>;
+        };
     };
     changelog?: {
         histories: IssueHistory[];
@@ -61,6 +72,7 @@ export interface WorkLog {
     started: string;
     comment?: string;
     estimatedTime: number;
+    category: 'nietGewerkt' | 'nietOpIssue' | 'ontwikkeling';
 }
 
 export interface EfficiencyData {
@@ -78,7 +90,16 @@ export interface EfficiencyTable {
     };
 }
 
+export interface WorkLogsSummary {
+    employee: string;
+    nietGewerkt: string;
+    nietOpIssues: string;
+    ontwikkeling: string;
+    total: string;
+}
+
 export interface WorkLogsResponse {
     workLogs: WorkLog[];
     efficiencyTable: EfficiencyData[];
+    workLogsSummary: WorkLogsSummary[];
 } 

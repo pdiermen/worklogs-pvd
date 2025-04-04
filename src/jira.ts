@@ -23,7 +23,7 @@ if (!JIRA_EMAIL || !JIRA_API_TOKEN || !JIRA_DOMAIN) {
 }
 
 // Create Jira client
-const jiraClient = axios.create({
+export const jiraClient = axios.create({
     baseURL: `https://${process.env.JIRA_HOST}/rest/api/2`,
     auth: {
         username: process.env.JIRA_USERNAME!,
@@ -34,51 +34,29 @@ const jiraClient = axios.create({
     }
 });
 
-// Error handler voor axios requests
+// Error handler voor Axios requests
 jiraClient.interceptors.response.use(
     response => response,
-    async (error: any) => {
-        let errorMessage = 'Onbekende fout';
-        let errorDetails = {};
-        let statusCode = 500;
-
+    error => {
         if (error.response) {
-            statusCode = error.response.status;
-            errorMessage = `Jira API error: ${error.response.status} - ${error.response.statusText}`;
-            errorDetails = {
+            // De server heeft een response gestuurd met een status code buiten het 2xx bereik
+            logger.error(`Jira API Error Response: ${JSON.stringify({
                 status: error.response.status,
                 statusText: error.response.statusText,
-                url: error.config?.url,
-                data: error.response.data,
-                headers: error.config?.headers
-            };
-            logger.error(`Jira API error details: ${JSON.stringify(errorDetails, null, 2)}`);
+                data: error.response.data
+            }, null, 2)}`);
         } else if (error.request) {
-            errorMessage = `Geen response ontvangen van Jira API: ${error.message}`;
-            errorDetails = {
-                request: error.request,
-                message: error.message,
-                config: {
-                    url: error.config?.url,
-                    method: error.config?.method,
-                    headers: error.config?.headers
-                }
-            };
-            logger.error(`Request error details: ${JSON.stringify(errorDetails, null, 2)}`);
+            // De request is gemaakt maar er is geen response ontvangen
+            logger.error(`Jira API Error Request: ${JSON.stringify(error.request, null, 2)}`);
         } else {
-            errorMessage = `Error bij het maken van request: ${error.message}`;
-            errorDetails = {
-                message: error.message,
-                stack: error.stack
-            };
-            logger.error(`General error details: ${JSON.stringify(errorDetails, null, 2)}`);
+            // Er is iets misgegaan bij het opzetten van de request
+            logger.error(`Jira API Error: ${error.message}`);
         }
-
-        const enhancedError = new Error(errorMessage) as any;
-        enhancedError.statusCode = statusCode;
-        enhancedError.details = errorDetails;
-        enhancedError.stack = error.stack;
-
+        
+        // Gooi een nieuwe error met meer details
+        const enhancedError = new Error(`Jira API Error: ${error.message}`);
+        (enhancedError as any).status = error.response?.status;
+        (enhancedError as any).data = error.response?.data;
         return Promise.reject(enhancedError);
     }
 );
@@ -193,6 +171,7 @@ export async function getActiveIssues(): Promise<Issue[]> {
             console.log(`- Parent: ${issue.fields?.parent?.key || 'Geen'}`);
             console.log(`- Geplande uren: ${formatTime(issue.fields?.timeestimate)}`);
             console.log(`- Sprint: ${issue.fields?.customfield_10020?.map(s => s.name).join(', ') || 'Niet gepland'}`);
+            console.log(`- Changelog: ${issue.changelog?.histories?.length || 0} histories`);
         });
 
         return response.data.issues;
@@ -204,188 +183,139 @@ export async function getActiveIssues(): Promise<Issue[]> {
 
 export async function getWorkLogs(startDate: string, endDate: string): Promise<WorkLogsResponse> {
     try {
-        logger.log(`Ophalen van worklogs van ${startDate} tot ${endDate}`);
+        // Haal alle issues op met worklogs in de opgegeven periode
+        const worklogIssuesJql = `project = ${process.env.JIRA_PROJECT} AND worklogDate >= "${startDate}" AND worklogDate <= "${endDate}" ORDER BY updated DESC`;
         
-        const workLogs: WorkLog[] = [];
-        const efficiencyTable: EfficiencyTable = {};
-        let totalWorklogEntries = 0;
-        let filteredWorklogEntries = 0;
-        let startAt = 0;
-        const maxResults = 100;
-        let hasMore = true;
-        let totalIssues = 0;
-
-        // Haal eerst alle Closed issues op die in de opgegeven periode zijn afgesloten
-        const closedIssuesJql = `project = ${process.env.JIRA_PROJECT} AND status = Closed AND status CHANGED TO Closed AFTER "${startDate}" AND status CHANGED TO Closed BEFORE "${endDate}" ORDER BY updated DESC`;
-        logger.log(`JQL voor Closed issues: ${closedIssuesJql}`);
+        logger.log(`JQL Query voor worklogs: ${worklogIssuesJql}`);
         
-        const closedIssuesResponse = await jiraClient.get('/search', {
+        const worklogIssuesResponse = await jiraClient.get('/search', {
             params: {
-                jql: closedIssuesJql,
-                fields: ['summary', 'timetracking', 'assignee', 'status', 'timeestimate', 'timeoriginalestimate'],
+                jql: worklogIssuesJql,
+                fields: ['summary', 'timetracking', 'assignee', 'status', 'timeestimate', 'timeoriginalestimate', 'worklog', 'issuetype'],
+                expand: ['changelog', 'worklog'],
                 maxResults: 1000
             }
-        }).catch(error => {
-            logger.error(`Error bij ophalen van Closed issues: ${error}`);
-            throw error;
         });
 
-        const closedIssues = closedIssuesResponse.data.issues || [];
-        logger.log(`${closedIssues.length} Closed issues gevonden`);
-
-        // Verwerk alle worklogs van Closed issues (voor efficiency tabel)
-        for (const issue of closedIssues) {
+        const worklogIssues = worklogIssuesResponse.data.issues || [];
+        logger.log(`Aantal issues gevonden met worklogs: ${worklogIssues.length}`);
+        
+        // Verzamel alle worklogs
+        const allWorklogs: WorkLog[] = [];
+        const efficiencyTable = new Map<string, { 
+            estimated: number; 
+            logged: number;
+        }>();
+        
+        // Verwerk worklog issues
+        for (const issue of worklogIssues) {
             try {
-                const worklogResponse = await jiraClient.get(`/issue/${issue.key}/worklog`).catch(error => {
-                    logger.error(`Error bij ophalen worklogs voor Closed issue ${issue.key}: ${error}`);
-                    return { data: { worklogs: [] } };
-                });
-                const worklog = worklogResponse.data;
-
-                if (!worklog || !worklog.worklogs) {
-                    continue;
-                }
-
-                // Log de timeestimate en timeoriginalestimate voor debugging
-                logger.log(`Closed Issue ${issue.key}:
-                    - Time Estimate: ${formatTime(issue.fields.timeestimate)}
-                    - Original Estimate: ${formatTime(issue.fields.timeoriginalestimate)}
-                    - Time Tracking: ${JSON.stringify(issue.fields.timetracking)}`);
-
-                // Verwerk alle worklogs van dit Closed issue
-                worklog.worklogs.forEach((entry: any) => {
-                    const workLog: WorkLog = {
-                        issueKey: issue.key,
-                        issueSummary: issue.fields.summary,
-                        author: entry.author.displayName,
-                        timeSpentSeconds: entry.timeSpentSeconds,
-                        started: entry.started,
-                        comment: entry.comment || '',
-                        estimatedTime: issue.fields.timeoriginalestimate || issue.fields.timeestimate || 0
-                    };
-
-                    // Update efficiency table
-                    if (!efficiencyTable[entry.author.displayName]) {
-                        efficiencyTable[entry.author.displayName] = {
-                            totalTimeSpent: 0,
-                            totalTimeEstimate: 0,
-                            efficiency: 0
+                // Haal worklogs direct op voor dit issue
+                const worklogResponse = await jiraClient.get(`/issue/${issue.key}/worklog`);
+                const worklogs = worklogResponse.data.worklogs || [];
+                logger.log(`Issue ${issue.key} heeft ${worklogs.length} worklogs`);
+                
+                for (const worklog of worklogs) {
+                    const logDate = new Date(worklog.started);
+                    if (logDate >= new Date(startDate) && logDate <= new Date(endDate)) {
+                        const author = worklog.author.displayName;
+                        const timeSpentHours = worklog.timeSpentSeconds / 3600;
+                        
+                        // Categoriseer de worklog
+                        let category: 'nietGewerkt' | 'nietOpIssue' | 'ontwikkeling' = 'ontwikkeling';
+                        if (issue.key === 'EET-3561') {
+                            category = 'nietGewerkt';
+                        } else if (issue.key === 'EET-3560') {
+                            category = 'nietOpIssue';
+                        }
+                        
+                        allWorklogs.push({
+                            issueKey: issue.key,
+                            issueSummary: issue.fields?.summary || '',
+                            author: author,
+                            timeSpentSeconds: worklog.timeSpentSeconds,
+                            started: worklog.started,
+                            comment: worklog.comment,
+                            estimatedTime: issue.fields?.timeoriginalestimate || 0,
+                            category: category
+                        });
+                        
+                        // Update efficiency table
+                        const current = efficiencyTable.get(author) || { 
+                            estimated: 0, 
+                            logged: 0
                         };
+                        
+                        current.logged += timeSpentHours;
+                        efficiencyTable.set(author, current);
                     }
-
-                    efficiencyTable[entry.author.displayName].totalTimeSpent += entry.timeSpentSeconds;
-                    efficiencyTable[entry.author.displayName].totalTimeEstimate += workLog.estimatedTime;
-                });
-            } catch (error) {
-                logger.error(`Error bij verwerken van Closed issue ${issue.key}: ${error}`);
+                }
+                
+                // Update efficiency table met estimated time
+                const assignee = issue.fields?.assignee?.displayName;
+                if (assignee) {
+                    const current = efficiencyTable.get(assignee) || { 
+                        estimated: 0, 
+                        logged: 0
+                    };
+                    current.estimated += (issue.fields?.timeoriginalestimate || 0) / 3600;
+                    efficiencyTable.set(assignee, current);
+                }
+            } catch (issueError) {
+                logger.error(`Error bij verwerken van issue ${issue.key}: ${issueError}`);
+                // Ga door met de volgende issue
                 continue;
             }
         }
+        
+        logger.log(`Totaal aantal worklogs gevonden: ${allWorklogs.length}`);
+        
+        // Converteer efficiency table naar array
+        const efficiencyData: EfficiencyData[] = Array.from(efficiencyTable.entries()).map(([assignee, data]) => ({
+            assignee,
+            estimated: data.estimated.toFixed(1),
+            logged: data.logged.toFixed(1),
+            efficiency: data.estimated > 0 ? ((data.logged / data.estimated) * 100).toFixed(1) : '0.0'
+        }));
+        
+        logger.log(`Efficiency data: ${JSON.stringify(efficiencyData, null, 2)}`);
+        
+        // Groepeer worklogs per medewerker
+        const workLogsByEmployee = new Map<string, WorkLog[]>();
+        allWorklogs.forEach(log => {
+            const logs = workLogsByEmployee.get(log.author) || [];
+            logs.push(log);
+            workLogsByEmployee.set(log.author, logs);
+        });
 
-        // Haal nu worklogs op voor de opgegeven periode (voor Worklogging tabel)
-        while (hasMore) {
-            const jql = `project = ${process.env.JIRA_PROJECT} AND worklogDate >= "${startDate}" AND worklogDate <= "${endDate}" ORDER BY updated DESC`;
-            logger.log(`JQL voor worklogs in periode: ${jql}`);
-            
-            const response = await jiraClient.get('/search', {
-                params: {
-                    jql,
-                    fields: ['summary', 'timetracking', 'assignee', 'status', 'timeestimate', 'timeoriginalestimate'],
-                    maxResults,
-                    startAt
-                }
-            }).catch(error => {
-                logger.error(`Error bij ophalen van worklogs in periode: ${error}`);
-                throw error;
-            });
+        // Bereken totalen per categorie per medewerker
+        const workLogsSummary = Array.from(workLogsByEmployee.entries()).map(([employee, logs]) => {
+            const nietGewerkt = logs.filter(log => log.issueKey === 'EET-3561');
+            const nietOpIssues = logs.filter(log => log.issueKey === 'EET-3560');
+            const ontwikkeling = logs.filter(log => log.issueKey !== 'EET-3561' && log.issueKey !== 'EET-3560');
 
-            if (!response.data.issues) {
-                logger.error('Geen issues gevonden in Jira response');
-                throw new Error('Geen issues gevonden in Jira response');
-            }
-
-            const issues = response.data.issues;
-            totalIssues += issues.length;
-            logger.log(`${issues.length} issues gevonden op pagina ${Math.floor(startAt / maxResults) + 1}`);
-
-            // Verwerk elke issue
-            for (const issue of issues) {
-                try {
-                    const worklogResponse = await jiraClient.get(`/issue/${issue.key}/worklog`).catch(error => {
-                        logger.error(`Error bij ophalen worklogs voor issue ${issue.key}: ${error}`);
-                        return { data: { worklogs: [] } };
-                    });
-                    const worklog = worklogResponse.data;
-
-                    if (!worklog || !worklog.worklogs) {
-                        continue;
-                    }
-
-                    // Log de timeestimate en timeoriginalestimate voor debugging
-                    logger.log(`Issue ${issue.key}:
-                        - Time Estimate: ${formatTime(issue.fields.timeestimate)}
-                        - Original Estimate: ${formatTime(issue.fields.timeoriginalestimate)}
-                        - Time Tracking: ${JSON.stringify(issue.fields.timetracking)}`);
-
-                    totalWorklogEntries += worklog.worklogs.length;
-
-                    // Verwerk elke worklog entry
-                    worklog.worklogs.forEach((entry: any) => {
-                        const workLogDate = new Date(entry.started);
-                        const startDateObj = new Date(startDate);
-                        const endDateObj = new Date(endDate);
-
-                        // Check of de worklog binnen de opgegeven periode valt
-                        if (workLogDate >= startDateObj && workLogDate <= endDateObj) {
-                            filteredWorklogEntries++;
-                            const workLog: WorkLog = {
-                                issueKey: issue.key,
-                                issueSummary: issue.fields.summary,
-                                author: entry.author.displayName,
-                                timeSpentSeconds: entry.timeSpentSeconds,
-                                started: entry.started,
-                                comment: entry.comment || '',
-                                estimatedTime: issue.fields.timeoriginalestimate || issue.fields.timeestimate || 0
-                            };
-                            workLogs.push(workLog);
-                        }
-                    });
-                } catch (error) {
-                    logger.error(`Error bij verwerken van issue ${issue.key}: ${error}`);
-                    continue;
-                }
-            }
-
-            // Check of er meer issues zijn
-            hasMore = issues.length === maxResults;
-            startAt += maxResults;
-        }
-
-        // Bereken efficiency voor elke medewerker
-        const efficiencyData: EfficiencyData[] = Object.entries(efficiencyTable).map(([assignee, data]) => {
-            const efficiency = data.totalTimeEstimate > 0 
-                ? (data.totalTimeSpent / data.totalTimeEstimate) * 100 
-                : 0;
+            const nietGewerktUren = nietGewerkt.reduce((sum, log) => sum + log.timeSpentSeconds, 0) / 3600;
+            const nietOpIssuesUren = nietOpIssues.reduce((sum, log) => sum + log.timeSpentSeconds, 0) / 3600;
+            const ontwikkelingUren = ontwikkeling.reduce((sum, log) => sum + log.timeSpentSeconds, 0) / 3600;
+            const totalUren = Number((nietGewerktUren + nietOpIssuesUren + ontwikkelingUren).toFixed(1));
 
             return {
-                assignee,
-                estimated: formatTime(data.totalTimeEstimate),
-                logged: formatTime(data.totalTimeSpent),
-                efficiency: efficiency.toFixed(1) + '%'
+                employee,
+                nietGewerkt: nietGewerktUren.toFixed(1),
+                nietOpIssues: nietOpIssuesUren.toFixed(1),
+                ontwikkeling: ontwikkelingUren.toFixed(1),
+                total: totalUren.toFixed(1)
             };
         });
 
-        logger.log(`Samenvatting:
-        - ${totalIssues} issues met worklogs
-        - ${filteredWorklogEntries} worklogs in periode
-        - ${Object.keys(efficiencyTable).length} medewerkers met efficiency data`);
-
         return {
-            workLogs,
-            efficiencyTable: efficiencyData
+            workLogs: allWorklogs,
+            efficiencyTable: efficiencyData,
+            workLogsSummary
         };
     } catch (error) {
-        logger.error(`Error bij ophalen van worklogs: ${error}`);
+        logger.error(`Error in getWorkLogs: ${error}`);
+        // Gooi de error door zodat deze correct kan worden afgehandeld door de aanroepende code
         throw error;
     }
 }
