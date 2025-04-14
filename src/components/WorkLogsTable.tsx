@@ -13,9 +13,14 @@ import type { WorkLog } from '../types';
 
 interface WorkLogsTableProps {
   workLogs: WorkLog[];
+  resourceIssues: {
+    nietGewerkt: string[];
+    overigeNietDeclarabel: string[];
+    productontwikkeling: string[];
+  };
 }
 
-export const WorkLogsTable: React.FC<WorkLogsTableProps> = ({ workLogs }) => {
+export const WorkLogsTable: React.FC<WorkLogsTableProps> = ({ workLogs, resourceIssues }) => {
   // Groepeer worklogs per medewerker
   const workLogsByAssignee = workLogs.reduce((acc, log) => {
     if (!acc[log.author]) {
@@ -33,9 +38,45 @@ export const WorkLogsTable: React.FC<WorkLogsTableProps> = ({ workLogs }) => {
   };
 
   Object.values(workLogsByAssignee).forEach(logs => {
-    totals.notWorked += logs.filter(log => log.comment.toLowerCase().includes('niet gewerkt')).reduce((sum, log) => sum + log.timeSpentSeconds, 0);
-    totals.nonBillable += logs.filter(log => log.comment.toLowerCase().includes('overige niet-declarabel')).reduce((sum, log) => sum + log.timeSpentSeconds, 0);
-    totals.productDev += logs.filter(log => log.comment.toLowerCase().includes('productontwikkeling')).reduce((sum, log) => sum + log.timeSpentSeconds, 0);
+    // Log de filtering criteria
+    console.info('Filtering criteria voor worklogs:');
+    console.info('- Niet gewerkt: comment bevat "niet gewerkt" OF issue is in nietGewerkt lijst');
+    console.info('- Overige niet-declarabel: comment bevat "overige niet-declarabel" OF issue is in overigeNietDeclarabel lijst');
+    console.info('- Productontwikkeling: comment bevat "productontwikkeling" OF issue is in productontwikkeling lijst');
+
+    // Log het aantal worklogs voor deze medewerker
+    console.info(`Aantal worklogs voor deze medewerker: ${logs.length}`);
+
+    // Log het aantal worklogs per categorie
+    const nietGewerktLogs = logs.filter(log => {
+      const comment = log.comment?.toLowerCase() || '';
+      const isNietGewerktComment = comment.includes('niet gewerkt');
+      const isNietGewerktIssue = resourceIssues.nietGewerkt.includes(log.issueKey);
+      return isNietGewerktComment || isNietGewerktIssue;
+    });
+
+    const overigeNietDeclarabelLogs = logs.filter(log => {
+      const comment = log.comment?.toLowerCase() || '';
+      const isOverigeNietDeclarabelComment = comment.includes('overige niet-declarabel');
+      const isOverigeNietDeclarabelIssue = resourceIssues.overigeNietDeclarabel.includes(log.issueKey);
+      return isOverigeNietDeclarabelComment || isOverigeNietDeclarabelIssue;
+    });
+
+    const productontwikkelingLogs = logs.filter(log => {
+      const comment = log.comment?.toLowerCase() || '';
+      const isProductontwikkelingComment = comment.includes('productontwikkeling');
+      const isProductontwikkelingIssue = resourceIssues.productontwikkeling.includes(log.issueKey);
+      return isProductontwikkelingComment || isProductontwikkelingIssue;
+    });
+
+    console.info(`Aantal worklogs per categorie:`);
+    console.info(`- Niet gewerkt: ${nietGewerktLogs.length}`);
+    console.info(`- Overige niet-declarabel: ${overigeNietDeclarabelLogs.length}`);
+    console.info(`- Productontwikkeling: ${productontwikkelingLogs.length}`);
+
+    totals.notWorked += nietGewerktLogs.reduce((sum, log) => sum + log.timeSpentSeconds, 0);
+    totals.nonBillable += overigeNietDeclarabelLogs.reduce((sum, log) => sum + log.timeSpentSeconds, 0);
+    totals.productDev += productontwikkelingLogs.reduce((sum, log) => sum + log.timeSpentSeconds, 0);
   });
 
   const grandTotal = totals.notWorked + totals.nonBillable + totals.productDev;
@@ -58,9 +99,9 @@ export const WorkLogsTable: React.FC<WorkLogsTableProps> = ({ workLogs }) => {
           </TableHead>
           <TableBody>
             {Object.entries(workLogsByAssignee).map(([assignee, logs]) => {
-              const notWorked = logs.filter(log => log.comment.toLowerCase().includes('niet gewerkt')).reduce((sum, log) => sum + log.timeSpentSeconds, 0);
-              const nonBillable = logs.filter(log => log.comment.toLowerCase().includes('overige niet-declarabel')).reduce((sum, log) => sum + log.timeSpentSeconds, 0);
-              const productDev = logs.filter(log => log.comment.toLowerCase().includes('productontwikkeling')).reduce((sum, log) => sum + log.timeSpentSeconds, 0);
+              const notWorked = logs.filter(log => log.comment?.toLowerCase().includes('niet gewerkt')).reduce((sum, log) => sum + log.timeSpentSeconds, 0);
+              const nonBillable = logs.filter(log => log.comment?.toLowerCase().includes('overige niet-declarabel')).reduce((sum, log) => sum + log.timeSpentSeconds, 0);
+              const productDev = logs.filter(log => log.comment?.toLowerCase().includes('productontwikkeling')).reduce((sum, log) => sum + log.timeSpentSeconds, 0);
               const total = notWorked + nonBillable + productDev;
 
               return (

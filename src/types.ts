@@ -9,6 +9,8 @@ export interface IssueHistory {
 export interface IssueLink {
     type: {
         name: string;
+        inward: string;
+        outward: string;
     };
     inwardIssue?: {
         key: string;
@@ -43,6 +45,12 @@ export interface Issue {
         issuetype?: {
             name: string;
         };
+        project?: {
+            key: string;
+            name: string;
+        };
+        created?: string;
+        resolutiondate?: string;
         issuelinks?: IssueLink[];
         parent?: {
             key: string;
@@ -50,9 +58,7 @@ export interface Issue {
         customfield_10020?: Sprint[];
         worklog?: {
             worklogs: Array<{
-                author: {
-                    displayName: string;
-                };
+                author: string | { displayName: string };
                 timeSpentSeconds: number;
                 started: string;
                 comment?: string;
@@ -65,21 +71,34 @@ export interface Issue {
 }
 
 export interface WorkLog {
+    id?: string;
     issueKey: string;
-    issueSummary: string;
-    author: string;
     timeSpentSeconds: number;
     started: string;
+    author: {
+        displayName: string;
+    } | string;
     comment?: string;
-    estimatedTime: number;
-    category: 'nietGewerkt' | 'nietOpIssue' | 'ontwikkeling';
+    category?: 'ontwikkeling' | 'overig';
+    issueSummary?: string;
+    issueStatus?: string;
+    issueAssignee?: string;
+    issuePriority?: {
+        name: string;
+    };
 }
 
 export interface EfficiencyData {
     assignee: string;
-    estimated: string;
-    logged: string;
-    efficiency: string;
+    estimatedHours: number;
+    loggedHours: number;
+    efficiency: number;
+    issueKeys?: string[];
+    issueDetails?: {
+        key: string;
+        estimatedHours: number;
+        loggedHours: number;
+    }[];
 }
 
 export interface EfficiencyTable {
@@ -101,5 +120,26 @@ export interface WorkLogsSummary {
 export interface WorkLogsResponse {
     workLogs: WorkLog[];
     efficiencyTable: EfficiencyData[];
-    workLogsSummary: WorkLogsSummary[];
+    workLogsSummary: Record<string, WorkLogsSummary[]>;
+}
+
+export interface ProjectConfig {
+    projectName: string;
+    projectCodes: string[];
+    jqlFilter: string;
+    worklogName: string;
+    worklogJql: string;
+}
+
+export interface WorklogConfig {
+    worklogName: string;
+    columnName: string;
+    issues: string[]; // Leeg betekent alle overige issues
+}
+
+export interface ProjectData {
+    config: ProjectConfig;
+    issues: Issue[];
+    worklogs: WorkLog[];
+    efficiency: EfficiencyData[];
 } 

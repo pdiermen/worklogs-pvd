@@ -1,11 +1,13 @@
 {
   "name": "planning-pvd",
   "version": "1.0.0",
+  "description": "Planning dashboard voor PvD",
   "type": "module",
   "scripts": {
-    "start": "NODE_OPTIONS='--loader ts-node/esm --no-warnings' ts-node-esm --project tsconfig.node.json src/server.ts",
+    "dev": "tsx watch src/server.ts",
     "build": "tsc",
-    "dev": "ts-node-dev --respawn src/server.ts"
+    "start": "node dist/server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",
@@ -34,7 +36,8 @@
     "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.3.3",
-    "winston": "^3.17.0"
+    "winston": "^3.17.0",
+    "tsx": "^4.7.1"
   },
   "devDependencies": {
     "ts-node": "^10.9.2",
