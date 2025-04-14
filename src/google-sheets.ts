@@ -156,4 +156,18 @@ export async function getWorklogConfigsFromSheet(): Promise<WorklogConfig[]> {
         logger.error(`Error bij ophalen van worklog configuraties uit Google Sheet: ${error.message}`);
         throw error;
     }
+}
+
+export async function getGoogleSheetsData() {
+  try {
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
+      range: 'Employees!A1:H', // Aangepast naar A1:H om alle kolommen op te halen
+    });
+
+    return response.data.values || [];
+  } catch (error) {
+    console.error('Error fetching Google Sheets data:', error);
+    return [];
+  }
 } 

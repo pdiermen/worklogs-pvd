@@ -13,6 +13,7 @@ import type { WorkLogsResponse } from './types.js';
 import { JIRA_DOMAIN } from './config.js';
 import axios from 'axios';
 import { getProjectConfigsFromSheet, getWorklogConfigsFromSheet } from './google-sheets.js';
+import { getGoogleSheetsData } from './google-sheets';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -75,18 +76,6 @@ jiraClient.interceptors.response.use(
         return Promise.reject(new Error(error.response?.data?.errorMessages?.[0] || error.message));
     }
 );
-
-async function getGoogleSheetsData(): Promise<string[][] | null> {
-    try {
-        const response = await sheets.spreadsheets.values.get({
-            spreadsheetId: SPREADSHEET_ID,
-            range: 'Employees!A:H'
-        });
-        return response.data.values as string[][];
-    } catch (error) {
-        return null;
-    }
-}
 
 app.get('/progress', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
@@ -274,11 +263,11 @@ app.get('/worklogs', (req, res) => {
                             <div class="row">
                                 <div class="col-md-4">
                                     <label for="startDate" class="form-label">Startdatum</label>
-                                    <input type="date" class="form-control" id="startDate" name="startDate" value="2025-03-03">
+                                    <input type="date" class="form-control" id="startDate" name="startDate">
                                 </div>
                                 <div class="col-md-4">
                                     <label for="endDate" class="form-label">Einddatum</label>
-                                    <input type="date" class="form-control" id="endDate" name="endDate" value="2025-03-30">
+                                    <input type="date" class="form-control" id="endDate" name="endDate">
                                 </div>
                                 <div class="col-md-4">
                                     <label class="form-label">&nbsp;</label>
@@ -295,11 +284,6 @@ app.get('/worklogs', (req, res) => {
                 </div>
             </div>
             <script>
-                // Laad worklogs automatisch bij het laden van de pagina
-                window.onload = function() {
-                    loadWorklogs();
-                };
-
                 async function loadWorklogs() {
                     const startDate = document.getElementById('startDate').value;
                     const endDate = document.getElementById('endDate').value;
@@ -2188,4 +2172,48 @@ function generateTotalWorklogsTable(worklogs: WorkLog[]): string {
 
     html += '</tbody></table></div></div>';
     return html;
+}
+
+interface Project {
+  key: string;
+  name: string;
+}
+
+const projects: Project[] = [
+  { key: 'PVD', name: 'Planning PvD' },
+  { key: 'PVDDEV', name: 'Planning PvD Development' }
+];
+
+async function loadWorklogs() {
+  try {
+    const employees = await getGoogleSheetsData();
+    const projectEmployees = employees.map(row => row[0]); // Eerste kolom bevat de medewerkersnamen
+
+    // Haal worklogs op voor alle projecten
+    const worklogs = await Promise.all(
+      projects.map(async (project: Project) => {
+        const projectWorklogs = await getWorkLogsForProject(
+          [project.key],
+          new Date(),
+          new Date(),
+          { projectName: project.name, projectCodes: [project.key], jqlFilter: '', worklogName: '', worklogJql: '' }
+        );
+        return {
+          project,
+          worklogs: projectWorklogs
+        };
+      })
+    );
+
+    return {
+      worklogs,
+      projectEmployees
+    };
+  } catch (error) {
+    console.error('Error loading worklogs:', error);
+    return {
+      worklogs: [],
+      projectEmployees: []
+    };
+  }
 }

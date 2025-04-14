@@ -18,15 +18,28 @@ interface WorkLogsTableProps {
     overigeNietDeclarabel: string[];
     productontwikkeling: string[];
   };
+  projectEmployees: string[]; // Nieuwe prop voor medewerkers die bij het project horen
 }
 
-export const WorkLogsTable: React.FC<WorkLogsTableProps> = ({ workLogs, resourceIssues }) => {
-  // Groepeer worklogs per medewerker
-  const workLogsByAssignee = workLogs.reduce((acc, log) => {
-    if (!acc[log.author]) {
-      acc[log.author] = [];
+export const WorkLogsTable: React.FC<WorkLogsTableProps> = ({ workLogs, resourceIssues, projectEmployees }) => {
+  // Helper functie om de displayName van een author te krijgen
+  const getAuthorDisplayName = (author: WorkLog['author']): string => {
+    if (typeof author === 'string') {
+      return author;
     }
-    acc[log.author].push(log);
+    return author.displayName;
+  };
+
+  // Filter worklogs op basis van medewerkers die bij het project horen
+  const filteredWorkLogs = workLogs.filter(log => projectEmployees.includes(getAuthorDisplayName(log.author)));
+
+  // Groepeer worklogs per medewerker
+  const workLogsByAssignee = filteredWorkLogs.reduce((acc, log) => {
+    const authorName = getAuthorDisplayName(log.author);
+    if (!acc[authorName]) {
+      acc[authorName] = [];
+    }
+    acc[authorName].push(log);
     return acc;
   }, {} as Record<string, WorkLog[]>);
 
@@ -50,23 +63,37 @@ export const WorkLogsTable: React.FC<WorkLogsTableProps> = ({ workLogs, resource
     // Log het aantal worklogs per categorie
     const nietGewerktLogs = logs.filter(log => {
       const comment = log.comment?.toLowerCase() || '';
-      const isNietGewerktComment = comment.includes('niet gewerkt');
+      const isNietGewerktComment = comment.includes('niet gewerkt') || 
+                                  comment.includes('niet gewerkt') || 
+                                  comment.includes('niet gewerkt') ||
+                                  comment.includes('niet gewerkt');
       const isNietGewerktIssue = resourceIssues.nietGewerkt.includes(log.issueKey);
       return isNietGewerktComment || isNietGewerktIssue;
     });
 
     const overigeNietDeclarabelLogs = logs.filter(log => {
       const comment = log.comment?.toLowerCase() || '';
-      const isOverigeNietDeclarabelComment = comment.includes('overige niet-declarabel');
+      const isOverigeNietDeclarabelComment = comment.includes('overige niet-declarabel') || 
+                                            comment.includes('overige niet declarabel') ||
+                                            comment.includes('niet declarabel') ||
+                                            comment.includes('niet-declarabel');
       const isOverigeNietDeclarabelIssue = resourceIssues.overigeNietDeclarabel.includes(log.issueKey);
       return isOverigeNietDeclarabelComment || isOverigeNietDeclarabelIssue;
     });
 
+    // Voor productontwikkeling: alle worklogs die niet in nietGewerkt of overigeNietDeclarabel zitten
     const productontwikkelingLogs = logs.filter(log => {
-      const comment = log.comment?.toLowerCase() || '';
-      const isProductontwikkelingComment = comment.includes('productontwikkeling');
-      const isProductontwikkelingIssue = resourceIssues.productontwikkeling.includes(log.issueKey);
-      return isProductontwikkelingComment || isProductontwikkelingIssue;
+      const isNietGewerkt = nietGewerktLogs.some(nietGewerktLog => 
+          nietGewerktLog.issueKey === log.issueKey && 
+          nietGewerktLog.started === log.started && 
+          getAuthorDisplayName(nietGewerktLog.author) === getAuthorDisplayName(log.author)
+      );
+      const isOverigeNietDeclarabel = overigeNietDeclarabelLogs.some(overigeLog => 
+          overigeLog.issueKey === log.issueKey && 
+          overigeLog.started === log.started && 
+          getAuthorDisplayName(overigeLog.author) === getAuthorDisplayName(log.author)
+      );
+      return !isNietGewerkt && !isOverigeNietDeclarabel;
     });
 
     console.info(`Aantal worklogs per categorie:`);
