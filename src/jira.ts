@@ -62,26 +62,7 @@ jiraClient.interceptors.response.use(
     }
 );
 
-interface JiraIssue {
-    key: string;
-    fields: {
-        summary: string;
-        project: {
-            key: string;
-            name: string;
-        };
-        assignee: {
-            displayName: string;
-        };
-        timeoriginalestimate: number;
-        timeestimate: number;
-        worklog: {
-            worklogs: WorkLog[];
-        };
-    };
-}
-
-export function isEETIssue(issue: JiraIssue): boolean {
+export function isEETIssue(issue: Issue): boolean {
   return issue.key.startsWith('EET-');
 }
 
@@ -95,7 +76,7 @@ export function formatTime(seconds: number | undefined): string {
 let activeIssuesCache: { issues: Issue[]; timestamp: number } | null = null;
 const CACHE_DURATION = 5 * 60 * 1000; // 5 minuten
 
-export async function getActiveIssues(): Promise<JiraIssue[]> {
+export async function getActiveIssues(): Promise<Issue[]> {
     console.log('[DEBUG] getActiveIssues functie wordt aangeroepen');
     
     const response = await jiraClient.get('/rest/api/2/search', {

@@ -1,28 +1,38 @@
 # Dependencies
 node_modules/
-
-# Environment files
-.env
-.env.local
-.env.*
+npm-debug.log
+yarn-debug.log
+yarn-error.log
 
 # Build output
 dist/
 build/
 
-# Logs
-*.log
-npm-debug.log*
+# Environment variables
+.env
+.env.local
+.env.*.local
 
-# IDE files
+# IDE
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# OS files
+# OS
 .DS_Store
 Thumbs.db
+
+# Application specific
+StartPlanningPvD.app/
+*.applescript
+run-app.js
+start-app.mjs
+start-app.sh
+
+# Logs
+*.log
+npm-debug.log*
 
 # Credentials
 credentials.json 

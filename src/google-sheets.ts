@@ -160,14 +160,41 @@ export async function getWorklogConfigsFromSheet(): Promise<WorklogConfig[]> {
 
 export async function getGoogleSheetsData() {
   try {
+    logger.log('Start ophalen van Resources sheet data...');
+    
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
-      range: 'Employees!A1:H', // Aangepast naar A1:H om alle kolommen op te halen
+      range: 'Employees!A1:H',
     });
 
-    return response.data.values || [];
+    const rows = response.data.values;
+    if (!rows || rows.length === 0) {
+      logger.error('Geen data gevonden in Resources sheet');
+      throw new Error('Geen data gevonden in Resources sheet');
+    }
+
+    // Valideer de verplichte kolommen
+    const headerRow = rows[0];
+    const nameIndex = headerRow.findIndex(header => header === 'Naam');
+    const projectIndex = headerRow.findIndex(header => header === 'Project');
+    const effectiveHoursIndex = headerRow.findIndex(header => header === 'Effectieve uren');
+
+    if (nameIndex === -1 || projectIndex === -1 || effectiveHoursIndex === -1) {
+      const missingColumns = [];
+      if (nameIndex === -1) missingColumns.push('Naam');
+      if (projectIndex === -1) missingColumns.push('Project');
+      if (effectiveHoursIndex === -1) missingColumns.push('Effectieve uren');
+      
+      if (missingColumns.length > 0) {
+        logger.error(`Verplichte kolommen ontbreken in Resources sheet: ${missingColumns.join(', ')}`);
+        throw new Error(`Verplichte kolommen ontbreken in Resources sheet: ${missingColumns.join(', ')}`);
+      }
+    }
+
+    logger.log(`${rows.length} rijen gevonden in Resources sheet`);
+    return rows;
   } catch (error) {
-    console.error('Error fetching Google Sheets data:', error);
-    return [];
+    logger.error(`Error bij ophalen van Resources sheet data: ${error instanceof Error ? error.message : error}`);
+    throw error;
   }
 } 
