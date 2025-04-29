@@ -9,7 +9,7 @@ import {
   Paper,
   Typography
 } from '@mui/material';
-import type { WorkLog } from '../types';
+import type { WorkLog } from '../types.js';
 
 interface WorkLogsTableProps {
   workLogs: WorkLog[];

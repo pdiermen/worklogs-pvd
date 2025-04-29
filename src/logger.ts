@@ -1,41 +1,63 @@
 import winston from 'winston';
+import path from 'path';
+import fs from 'fs';
 
-const logger = winston.createLogger({
-    level: 'info',
+// Maak de logs directory aan als deze niet bestaat
+const logDir = path.join(process.cwd(), 'logs');
+if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir);
+}
+
+// Maak het log bestand leeg bij elke herstart
+const logFile = path.join(logDir, 'app.log');
+if (fs.existsSync(logFile)) {
+    fs.writeFileSync(logFile, '');
+}
+
+const winstonLogger = winston.createLogger({
+    level: 'debug',
     format: winston.format.combine(
         winston.format.timestamp(),
         winston.format.json()
     ),
     transports: [
+        new winston.transports.File({ 
+            filename: logFile,
+            format: winston.format.combine(
+                winston.format.timestamp(),
+                winston.format.printf(({ timestamp, level, message, ...metadata }) => {
+                    let msg = `${timestamp} [${level}] : ${message}`;
+                    if (Object.keys(metadata).length > 0) {
+                        msg += ` ${JSON.stringify(metadata)}`;
+                    }
+                    return msg;
+                })
+            )
+        }),
         new winston.transports.Console({
             format: winston.format.combine(
                 winston.format.colorize(),
                 winston.format.simple()
             )
-        }),
-        new winston.transports.File({
-            filename: 'error.log',
-            level: 'error'
-        }),
-        new winston.transports.File({
-            filename: 'combined.log'
         })
     ]
 });
 
 // Handle uncaught exceptions and unhandled rejections
-logger.exceptions.handle(
+winstonLogger.exceptions.handle(
     new winston.transports.File({ filename: 'exceptions.log' })
 );
 
-logger.rejections.handle(
+winstonLogger.rejections.handle(
     new winston.transports.File({ filename: 'rejections.log' })
 );
 
-// Add log and error methods for compatibility with old logger
-const compatLogger = {
-    log: (message: string) => logger.info(message),
-    error: (message: string) => logger.error(message)
-};
-
-export { compatLogger as logger }; 
+// Compatibiliteitslaag voor de oude logger interface
+export const logger = {
+    log: (message: string, metadata?: any) => {
+        winstonLogger.info(message, metadata);
+    },
+    error: (message: string, metadata?: any) => {
+        winstonLogger.error(message, metadata);
+    }
+}; 

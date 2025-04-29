@@ -106,6 +106,8 @@ export async function getProjectConfigsFromSheet(): Promise<ProjectConfig[]> {
                     worklogName: worklogName || '',
                     worklogJql: worklogJql || ''
                 });
+                logger.log(`Project configuratie voor ${projectName}:`);
+                logger.log(`- WorklogJql: ${worklogJql || 'geen'}`);
             }
         });
 
@@ -160,7 +162,6 @@ export async function getWorklogConfigsFromSheet(): Promise<WorklogConfig[]> {
 
 export async function getGoogleSheetsData() {
   try {
-    logger.log('Start ophalen van Resources sheet data...');
     
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
@@ -185,7 +186,6 @@ export async function getGoogleSheetsData() {
       throw new Error(`Verkeerde kolom headers in Employees sheet`);
     }
 
-    logger.log(`${rows.length} rijen gevonden in Resources sheet`);
     return rows;
   } catch (error) {
     logger.error(`Error bij ophalen van Resources sheet data: ${error instanceof Error ? error.message : error}`);

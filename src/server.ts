@@ -1131,7 +1131,8 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
 
         // Maak een map om de totale uren per medewerker en categorie bij te houden
         const totalHoursByEmployeeAndCategory = new Map<string, Map<string, number>>();
-
+        const allProjectWorklogs: WorkLog[] = [];
+        
         // Verwerk de worklog groepen
         for await (const [worklogName, configs] of worklogGroups) {
             logger.log(`Verwerken worklog groep: ${worklogName}`);
@@ -1167,37 +1168,17 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
                     const projectIndex = 7; // Kolom H (Project)
                     const effectiveHoursIndex = 6; // Kolom G (Effectieve uren)
                     
-                    logger.log(`\nAlle medewerkers en hun projecten:`);
-                    googleSheetsData.slice(1).forEach((row, index) => {
-                        const medewerker = row[nameIndex] || 'Onbekend';
-                        const project = row[projectIndex] || 'Geen project';
-                        const uren = row[effectiveHoursIndex] || '0';
-                        logger.log(`${index + 1}. ${medewerker} - Project: ${project} - Uren: ${uren}`);
-                    });
-                    
                     const activeEmployees = googleSheetsData
                         .slice(1) // Skip header row
                         .filter(row => {
                             const sheetProjectName = (row[projectIndex] || '').toString().trim();
                             const configProjectName = projectConfig.projectName.trim();
                             const matches = sheetProjectName === configProjectName;
-                            logger.log(`\nVergelijking voor ${row[nameIndex]}:`);
-                            logger.log(`Project in sheet: "${sheetProjectName}"`);
-                            logger.log(`Project config: "${configProjectName}"`);
-                            logger.log(`Match: ${matches}`);
                             return matches;
                         })
                         .map(row => row[nameIndex]); // Haal medewerkersnamen op
                     
-                    logger.log(`Actieve medewerkers voor ${projectConfig.projectName}:`);
-                    logger.log(JSON.stringify(activeEmployees, null, 2));
-                    
-                    logger.log(`Voorbeelden van worklog auteurs:`);
-                    columnWorklogs.slice(0, 5).forEach(log => {
-                        const authorName = typeof log.author === 'string' ? log.author : log.author.displayName;
-                        logger.log(`- ${authorName}`);
-                    });
-                    
+                     
                     // Bouw de JQL query
                     let jql = `project in (${projectConfig.projectCodes.map(code => `"${code}"`).join(', ')})`;
                     
@@ -1209,6 +1190,11 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
                         jql += ` AND ${config.issues[0]}`;
                     }
                     
+                    // Voeg worklogJql toe als filter voor kolommen zonder issuefilter
+                    if ((!config.issues || config.issues.length === 0) && projectConfig.worklogJql) {
+                        jql += ` AND ${projectConfig.worklogJql}`;
+                    }
+                    
                     logger.log(`JQL query voor ${config.columnName}: ${jql}`);
                     
                     // Haal worklogs op voor deze kolom
@@ -1218,6 +1204,35 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
                         parsedEndDate,
                         { ...projectConfig, jqlFilter: jql }
                     );
+                    
+                    // Log worklogs per issue
+                    logger.log(`\nWorklogs voor kolom ${config.columnName}:`);
+                    const worklogsByIssue = new Map<string, { author: string; hours: number }[]>();
+                    columnWorklogs.forEach(log => {
+                        const authorName = typeof log.author === 'string' ? log.author : log.author.displayName;
+                        const hours = log.timeSpentSeconds / 3600;
+                        
+                        // Controleer of de medewerker actief is voor dit project
+                        if (!activeEmployees.includes(authorName)) {
+                            logger.log(`- ${authorName} is geen actieve medewerker voor ${projectConfig.projectName}, worklog wordt genegeerd`);
+                            return;
+                        }
+                        
+                        if (!worklogsByIssue.has(log.issueKey)) {
+                            worklogsByIssue.set(log.issueKey, []);
+                        }
+                        worklogsByIssue.get(log.issueKey)!.push({ author: authorName, hours });
+                    });
+                    
+                    worklogsByIssue.forEach((logs, issueKey) => {
+                        logger.log(`\nIssue: ${issueKey}`);
+                        logs.forEach(log => {
+                            logger.log(`- ${log.author}: ${log.hours.toFixed(1)} uur`);
+                        });
+                    });
+                    
+                    // Voeg worklogs toe aan alle project worklogs
+                    allProjectWorklogs.push(...columnWorklogs);
                     
                     logger.log(`Aantal worklogs voor ${config.columnName}: ${columnWorklogs.length}`);
                     
@@ -1242,6 +1257,47 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
                         employeeCategories.set(config.columnName, currentHours + (log.timeSpentSeconds / 3600));
                     });
                 }
+                
+                // Eerst alle kolommen met issuefilter verwerken
+                const kolommenMetIssuefilter = configs.filter(config => config.issues && config.issues.length > 0);
+                logger.log(`\nKolommen met issuefilter: ${kolommenMetIssuefilter.map(c => c.columnName).join(', ')}`);
+                
+                // Bereken waarden voor kolommen zonder issuefilter
+                projectHoursByEmployeeAndCategory.forEach((employeeCategories, employee) => {
+                    // Haal alle worklogs op voor deze medewerker (zonder issuefilter)
+                    const allWorklogs = allProjectWorklogs.filter(log => {
+                        const authorName = typeof log.author === 'string' ? log.author : log.author.displayName;
+                        return authorName === employee;
+                    });
+                    
+                    // Bereken totaal aantal uren (alle worklogs)
+                    const alleWorklogs = allWorklogs.reduce((sum, log) => sum + (log.timeSpentSeconds / 3600), 0);
+                    
+                    // Update totaal
+                    employeeCategories.set('Totaal', alleWorklogs);
+                    
+                    // Log de waarden voor kolommen met issuefilter
+                    logger.log(`\nWaarden voor ${employee}:`);
+                    kolommenMetIssuefilter.forEach(config => {
+                        const waarde = employeeCategories.get(config.columnName) || 0;
+                        logger.log(`- ${config.columnName}: ${waarde}`);
+                    });
+                    
+                    // Bereken waarden voor kolommen zonder issuefilter
+                    configs.forEach(config => {
+                        if (!config.issues || config.issues.length === 0) {
+                            // Zet alle worklogs in de kolom zonder issuefilter
+                            employeeCategories.set(config.columnName, alleWorklogs);
+                            
+                            // Log de waarde
+                            logger.log(`\nBerekening voor ${employee} - ${config.columnName}:`);
+                            logger.log(`- Waarde (alle worklogs): ${alleWorklogs}`);
+                            
+                            // Geen aftrekking meer van andere kolommen
+                            logger.log(`- ${config.columnName} (berekend): ${employeeCategories.get(config.columnName) || 0}`);
+                        }
+                    });
+                });
 
                 // Genereer de worklogs tabel voor dit project
                 let worklogsTable = `
@@ -1264,7 +1320,14 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
                             let totaal = 0;
 
                             configs.forEach(config => {
-                                const hours = employeeCategories.get(config.columnName) || 0;
+                                let hours = employeeCategories.get(config.columnName) || 0;
+                                
+                                // Voor de 'Ontwikkeling' kolom gebruiken we de berekende waarde
+                                if (config.columnName === 'Ontwikkeling') {
+                                    // De waarde is al berekend met 2x aftrek in de vorige stap
+                                    hours = employeeCategories.get(config.columnName) || 0;
+                                }
+                                
                                 totaal += hours;
                                 worklogsTable += `<td>${hours.toFixed(1)}</td>`;
                                 

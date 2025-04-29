@@ -4,7 +4,7 @@ import * as dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { logger } from './logger.js';
-import { WorkLogsResponse as OldWorkLogsResponse, EfficiencyTable } from './types';
+import { WorkLogsResponse as OldWorkLogsResponse, EfficiencyTable } from './types.js';
 import { getSprintCapacityFromSheet, ProjectConfig, getProjectConfigsFromSheet, getGoogleSheetsData } from './google-sheets.js';
 import { format } from 'date-fns';
 
@@ -378,64 +378,38 @@ export async function getWorkLogsForProject(
     let startAt = 0;
     const maxResults = 100;
 
-    // Haal Google Sheets data op om te controleren welke medewerkers actief zijn op dit project
-    const googleSheetsData = await getGoogleSheetsData();
-    if (!googleSheetsData) {
-        logger.error('Geen Google Sheets data beschikbaar voor project medewerkers filtering');
-        return worklogs;
+    // Bouw basis JQL query met project filter
+    let jql = `project in (${projectCodes.map(code => `"${code}"`).join(',')})`;
+    
+    // Voeg periode filter toe
+    jql += ` AND worklogDate >= "${startDate.toISOString().split('T')[0]}" AND worklogDate <= "${endDate.toISOString().split('T')[0]}"`;
+    
+    // Als er een jqlFilter is, voeg deze toe
+    if (config.jqlFilter) {
+        jql += ` AND ${config.jqlFilter}`;
+    }
+    // Als er een worklogJql is, voeg deze toe
+    else if (config.worklogJql && config.worklogJql.trim() !== '') {
+        jql += ` AND (${config.worklogJql})`;
     }
 
-    // Haal de kolom indices op
-    const headerRow = googleSheetsData[0];
-    const nameIndex = headerRow.indexOf('Naam');
-    const projectIndex = headerRow.indexOf('Project');
+    logger.log(`\n=== Worklog Query ===`);
+    logger.log(`Project: "${config.projectName}"`);
+    logger.log(`JQL: ${jql}`);
 
-    if (nameIndex === -1 || projectIndex === -1) {
-        logger.error('Verplichte kolommen niet gevonden in Google Sheets data');
-        return worklogs;
-    }
-
-    // Maak een Set van medewerkers die actief zijn op dit project
-    const projectEmployees = new Set<string>();
-    for (let i = 1; i < googleSheetsData.length; i++) {
-        const row = googleSheetsData[i];
-        const employeeName = row[nameIndex];
-        const projects = (row[projectIndex] || '').split(',').map((p: string) => p.trim());
-        
-        if (employeeName && projects.includes(config.projectName)) {
-            projectEmployees.add(employeeName);
-        }
-    }
-
-    logger.log(`Medewerkers actief op project ${config.projectName}: ${Array.from(projectEmployees).join(', ')}`);
-
-    while (true) {
-        // Bouw basis JQL query met alleen project filter
-        let jql = `project in (${projectCodes.join(',')})`;
-
-        // Voeg worklog JQL filter toe als deze bestaat
-        if (config.worklogJql && config.worklogJql.trim() !== '') {
-            jql = `${config.worklogJql}`;
-        }
-
-        // Voeg datum filter toe
-        const dateFilter = `worklogDate >= "${format(startDate, 'yyyy-MM-dd')}" AND worklogDate <= "${format(endDate, 'yyyy-MM-dd')}"`;
-        jql += ` AND ${dateFilter}`;
-
-        logger.log(`Volledige JQL Query voor Worklogs: ${jql}`);
-
-        // Haal eerst de issues op
+    try {
+        // Haal issues op met worklogs in de opgegeven periode
         const response = await jiraClient.get('/search', {
             params: {
                 jql,
-                startAt,
                 maxResults,
-                fields: ['summary', 'project', 'assignee', 'timeoriginalestimate', 'timeestimate', 'priority', 'worklog']
+                startAt,
+                fields: 'summary,project,assignee,worklog'
             }
         });
 
         const issues = response.data.issues || [];
-        logger.log(`Aantal issues gevonden in deze batch: ${issues.length}`);
+        logger.log(`Aantal issues gevonden: ${issues.length}`);
 
         // Haal voor elk issue de worklogs op
         for (const issue of issues) {
@@ -450,18 +424,14 @@ export async function getWorkLogsForProject(
                 const issueWorklogs = (worklogResponse.data.worklogs || []) as JiraWorkLog[];
                 
                 if (issueWorklogs.length > 0) {
-                    // Filter worklogs op basis van de datum en de medewerker
+                    // Filter worklogs op basis van de datum
                     const filteredWorklogs = issueWorklogs.filter((log: JiraWorkLog) => {
                         const logDate = new Date(log.started);
-                        const authorName = typeof log.author === 'string' ? log.author : log.author.displayName;
-                        return logDate >= startDate && 
-                               logDate <= endDate && 
-                               projectEmployees.has(authorName);
+                        return logDate >= startDate && logDate <= endDate;
                     });
 
                     if (filteredWorklogs.length > 0) {
-                        logger.log(`Issue ${issue.key}: ${filteredWorklogs.length} worklogs gevonden in de opgegeven periode voor actieve project medewerkers`);
-                        const processedWorklogs = filteredWorklogs.map((log: JiraWorkLog) => ({
+                           const processedWorklogs = filteredWorklogs.map((log: JiraWorkLog) => ({
                             issueKey: issue.key,
                             issue: {
                                 key: issue.key,
@@ -483,7 +453,7 @@ export async function getWorkLogsForProject(
                         
                         worklogs.push(...processedWorklogs);
                     } else {
-                        logger.log(`Issue ${issue.key}: Geen worklogs gevonden in de opgegeven periode voor actieve project medewerkers`);
+                        logger.log(`Issue ${issue.key}: Geen worklogs gevonden in de opgegeven periode`);
                     }
                 } else {
                     logger.log(`Issue ${issue.key}: Geen worklogs gevonden`);
@@ -495,19 +465,11 @@ export async function getWorkLogsForProject(
             }
         }
 
-        // Controleer of er meer resultaten zijn
-        const hasMore = startAt + maxResults < response.data.total;
-        if (hasMore) {
-            startAt += maxResults;
-            logger.log(`Er zijn meer resultaten beschikbaar. Volgende batch start bij ${startAt}`);
-        } else {
-            logger.log(`Alle resultaten opgehaald (totaal: ${response.data.total}).`);
-            break;
-        }
+        return worklogs;
+    } catch (error) {
+        logger.error(`Error bij ophalen van worklogs: ${error}`);
+        throw error;
     }
-
-    logger.log(`Totaal aantal worklogs gevonden voor project ${config.projectName}: ${worklogs.length}`);
-    return worklogs;
 }
 
 export async function getWorklogsForIssues(issues: Issue[]): Promise<WorkLog[]> {
