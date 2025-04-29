@@ -175,20 +175,14 @@ export async function getGoogleSheetsData() {
 
     // Valideer de verplichte kolommen
     const headerRow = rows[0];
-    const nameIndex = headerRow.findIndex(header => header === 'Naam');
-    const projectIndex = headerRow.findIndex(header => header === 'Project');
-    const effectiveHoursIndex = headerRow.findIndex(header => header === 'Effectieve uren');
+    const nameIndex = 2; // Kolom C (Naam)
+    const projectIndex = 7; // Kolom H (Project)
+    const effectiveHoursIndex = 6; // Kolom G (Effectieve uren)
 
-    if (nameIndex === -1 || projectIndex === -1 || effectiveHoursIndex === -1) {
-      const missingColumns = [];
-      if (nameIndex === -1) missingColumns.push('Naam');
-      if (projectIndex === -1) missingColumns.push('Project');
-      if (effectiveHoursIndex === -1) missingColumns.push('Effectieve uren');
-      
-      if (missingColumns.length > 0) {
-        logger.error(`Verplichte kolommen ontbreken in Resources sheet: ${missingColumns.join(', ')}`);
-        throw new Error(`Verplichte kolommen ontbreken in Resources sheet: ${missingColumns.join(', ')}`);
-      }
+    // Controleer of de headers overeenkomen met wat we verwachten
+    if (headerRow[nameIndex] !== 'Naam' || headerRow[projectIndex] !== 'Project' || headerRow[effectiveHoursIndex] !== 'Effectieve uren') {
+      logger.error(`Verkeerde kolom headers in Employees sheet. Verwacht: Naam (C), Project (H), Effectieve uren (G)`);
+      throw new Error(`Verkeerde kolom headers in Employees sheet`);
     }
 
     logger.log(`${rows.length} rijen gevonden in Resources sheet`);
