@@ -72,33 +72,19 @@ export interface Issue {
 
 export interface WorkLog {
     id?: string;
-    issueKey: string;
+    author: string | { displayName: string; };
     timeSpentSeconds: number;
     started: string;
-    author: {
-        displayName: string;
-    } | string;
+    issueKey: string;
     comment?: string;
-    category?: 'ontwikkeling' | 'overig';
-    issueSummary?: string;
-    issueStatus?: string;
-    issueAssignee?: string;
-    issuePriority?: {
-        name: string;
-    };
 }
 
 export interface EfficiencyData {
-    assignee: string;
-    estimatedHours: number;
-    loggedHours: number;
+    employee: string;
+    totalHours: number;
+    nonWorkingHours: number;
+    nonIssueHours: number;
     efficiency: number;
-    issueKeys?: string[];
-    issueDetails?: {
-        key: string;
-        estimatedHours: number;
-        loggedHours: number;
-    }[];
 }
 
 export interface EfficiencyTable {
@@ -125,16 +111,16 @@ export interface WorkLogsResponse {
 
 export interface ProjectConfig {
     projectName: string;
-    projectCodes: string[];
-    jqlFilter: string;
-    worklogName: string;
-    worklogJql: string;
+    projectCode: string;
+    sprintNames: string[];
+    employees: string[];
 }
 
 export interface WorklogConfig {
-    worklogName: string;
+    projectName: string;
     columnName: string;
-    issues: string[]; // Leeg betekent alle overige issues
+    issues?: string[];
+    worklogJql?: string;
 }
 
 export interface ProjectData {
@@ -142,4 +128,74 @@ export interface ProjectData {
     issues: Issue[];
     worklogs: WorkLog[];
     efficiency: EfficiencyData[];
+}
+
+export interface JiraIssue {
+    id?: string;
+    key: string;
+    fields: {
+        summary: string;
+        priority: {
+            name: string;
+        };
+        assignee: {
+            displayName: string;
+        };
+        timeestimate: number;
+        status?: {
+            name: string;
+        };
+        timeoriginalestimate?: number;
+        worklog?: {
+            worklogs: WorkLog[];
+        };
+    };
+}
+
+export interface SprintResult {
+    sprint: string;
+    hours: number;
+    issues: { key: string; hours: number; }[];
+}
+
+export interface EmployeeResult {
+    name: string;
+    hours: number;
+    issues: { key: string; hours: number; }[];
+    sprintHours: SprintResult[];
+}
+
+export interface PlanningResult {
+    projectName: string;
+    employeeResults: {
+        employeeName: string;
+        sprintHours: Record<string, number>;
+    }[];
+    sprintCapacity: number;
+    employeeSprintUsedHours: {
+        employee: string;
+        sprintHours: {
+            sprint: string;
+            hours: number;
+        }[];
+    }[];
+    plannedIssues: {
+        sprint: string;
+        issues: {
+            key: string;
+            summary: string;
+            assignee: string;
+            hours: number;
+        }[];
+    }[];
+}
+
+export interface Worklog {
+    id: string;
+    timeSpentSeconds: number;
+    started: string;
+    author: {
+        displayName: string;
+    };
+    comment?: string;
 } 

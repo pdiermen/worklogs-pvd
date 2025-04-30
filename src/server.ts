@@ -1,6 +1,5 @@
 import express from 'express';
 import type { Request, Response, RequestHandler, NextFunction } from 'express';
-import type { Issue as JiraIssue, Issue, IssueLink, EfficiencyData, ProjectConfig, WorklogConfig, WorkLog, Sprint } from './types.js';
 import { config } from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -14,6 +13,42 @@ import { JIRA_DOMAIN } from './config.js';
 import axios from 'axios';
 import { getProjectConfigsFromSheet, getWorklogConfigsFromSheet } from './google-sheets.js';
 import { getGoogleSheetsData } from './google-sheets.js';
+import { 
+    Issue, 
+    WorkLog, 
+    EmployeeResult, 
+    SprintResult, 
+    GoogleSheetsData, 
+    WorklogConfig,
+    EfficiencyData,
+    JiraIssue
+} from './types.js';
+
+type GoogleSheetsData = (string | null)[][];
+
+interface SprintCapacity {
+    employee: string;
+    sprint: string;
+    capacity: number;
+    project: string;
+}
+
+interface PlanningResult {
+    sprintCapacity: SprintCapacity[];
+    employeeSprintUsedHours: {
+        employee: string;
+        sprintHours: {
+            sprint: string;
+            hours: number;
+            issues: { key: string; hours: number }[];
+        }[];
+    }[];
+    plannedIssues: {
+        issue: JiraIssue;
+        sprint: string;
+        hours: number;
+    }[];
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -69,50 +104,71 @@ app.use(cors());
 app.use(express.json());
 
 // Basis route
-app.get('/', (req, res) => {
-    res.send(`
-        <!DOCTYPE html>
-        <html lang="nl">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Planning Dashboard</title>
-            <style>
-                ${styles}
-            </style>
-        </head>
-        <body>
-            <nav class="navbar">
-                <a href="/" class="navbar-brand">Planning Dashboard</a>
-                <ul class="navbar-nav">
-                    <li class="nav-item">
-                        <a href="/" class="nav-link active">Projecten</a>
-                    </li>
-                    <li class="nav-item">
-                        <a href="/worklogs" class="nav-link">Worklogs & Efficiëntie</a>
-                    </li>
-                </ul>
-            </nav>
-            <div class="container">
-                <div class="card mb-4">
-                    <div class="card-header">
-                        <h2 class="mb-0">Projecten</h2>
-                    </div>
-                    <div class="card-body">
-                        <div class="row">
-                            <div class="col-md-6">
-                                <a href="/planning?project=PVD" class="btn btn-primary btn-lg btn-block mb-3">Planning PvD</a>
-                            </div>
-                            <div class="col-md-6">
-                                <a href="/planning?project=PVDDEV" class="btn btn-primary btn-lg btn-block mb-3">Planning PvD Development</a>
-                            </div>
-                        </div>
-                    </div>
+app.get('/', async (req, res) => {
+    try {
+        // Haal project configuraties op
+        const projectConfigs = await getProjectConfigsFromSheet();
+        logger.log(`Beschikbare projecten: ${projectConfigs.map(p => p.projectName).join(', ')}`);
+        
+        // Haal Google Sheets data op
+        const googleSheetsData = await getGoogleSheetsData();
+        
+        // Verwerk elk project
+        let html = `
+            <!DOCTYPE html>
+            <html lang="nl">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Planning Overzicht</title>
+                <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+                <style>
+                    ${styles}
+                    .table { font-size: 0.9rem; }
+                    .table th { background-color: #f8f9fa; }
+                    .table-success { background-color: #d4edda !important; }
+                    .table-warning { background-color: #fff3cd !important; }
+                    .table-danger { background-color: #f8d7da !important; }
+                    .btn-group { margin-bottom: 20px; }
+                    .navbar { margin-bottom: 20px; }
+                </style>
+            </head>
+            <body>
+                <nav class="navbar">
+                    <a href="/" class="navbar-brand">Planning Dashboard</a>
+                    <ul class="navbar-nav">
+                        <li class="nav-item">
+                            <a href="/" class="nav-link active">Planning</a>
+                        </li>
+                        <li class="nav-item">
+                            <a href="/worklogs" class="nav-link">Worklogs & Efficiëntie</a>
+                        </li>
+                    </ul>
+                </nav>
+                <div class="container-fluid">
+        `;
+
+        // Verwerk elk project
+        for (const projectConfig of projectConfigs) {
+            const issues = await getIssues(projectConfig.jqlFilter);
+            const planning = await calculatePlanning(issues, projectConfig.projectName, googleSheetsData);
+            const sprintNames = await getSprintNamesFromSheet(googleSheetsData);
+            
+            html += generatePlanningTable(planning, sprintNames);
+        }
+
+        html += `
                 </div>
-            </div>
-        </body>
-        </html>
-    `);
+                <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+            </body>
+            </html>
+        `;
+
+        res.send(html);
+    } catch (error) {
+        console.error('Error in / route:', error);
+        res.status(500).send('Er is een fout opgetreden bij het ophalen van de planning');
+    }
 });
 
 // Configureer axios interceptors voor error handling
@@ -293,7 +349,7 @@ app.get('/worklogs', (req, res) => {
                 <a href="/" class="navbar-brand">Planning Dashboard</a>
                 <ul class="navbar-nav">
                     <li class="nav-item">
-                        <a href="/" class="nav-link">Projecten</a>
+                        <a href="/" class="nav-link">Planning</a>
                     </li>
                     <li class="nav-item">
                         <a href="/worklogs" class="nav-link active">Worklogs & Efficiëntie</a>
@@ -812,11 +868,17 @@ app.get('/planning', async (req, res) => {
             return res.status(400).send('Project type is verplicht');
         }
 
+        // Haal project configuraties op
         const projectConfigs = await getProjectConfigsFromSheet();
+        logger.log(`Beschikbare projecten: ${projectConfigs.map(p => p.projectName).join(', ')}`);
+        
         const projectConfig = projectConfigs.find(config => config.projectName === projectType);
         if (!projectConfig) {
+            logger.error(`Project configuratie niet gevonden voor: ${projectType}`);
             return res.status(404).send('Project configuratie niet gevonden');
         }
+
+        logger.log(`Project configuratie gevonden: ${JSON.stringify(projectConfig)}`);
 
         // Haal Google Sheets data op
         let googleSheetsData;
@@ -855,13 +917,10 @@ app.get('/planning', async (req, res) => {
                     <a href="/" class="navbar-brand">Planning Dashboard</a>
                     <ul class="navbar-nav">
                         <li class="nav-item">
-                            <a href="/" class="nav-link">Projecten</a>
+                            <a href="/" class="nav-link active">Planning</a>
                         </li>
                         <li class="nav-item">
                             <a href="/worklogs" class="nav-link">Worklogs & Efficiëntie</a>
-                        </li>
-                        <li class="nav-item">
-                            <a href="/planning?project=${projectType}" class="nav-link active">Planning</a>
                         </li>
                     </ul>
                 </nav>
@@ -1049,48 +1108,7 @@ async function loadWorklogs() {
   }
 }
 
-interface PlanningResult {
-    sprintCapacity: SprintCapacity[];
-    employeeSprintUsedHours: {
-        employee: string;
-        sprintHours: {
-            sprint: string;
-            hours: number;
-            issues: { key: string; hours: number }[];
-        }[];
-    }[];
-    plannedIssues: {
-        issue: PlanningIssue;
-        sprint: string;
-        hours: number;
-    }[];
-}
-
-interface SprintCapacity {
-    employee: string;
-    sprint: string;
-    capacity: number;
-    project: string;
-}
-
-interface PlanningIssue {
-    key: string;
-    fields?: {
-        summary?: string;
-        status?: {
-            name: string;
-        };
-        priority?: {
-            name: string;
-        };
-        assignee?: {
-            displayName: string;
-        };
-        timeestimate?: number;
-    };
-}
-
-async function calculatePlanning(issues: PlanningIssue[], projectType: string, googleSheetsData: (string | null)[][] | null): Promise<PlanningResult> {
+async function calculatePlanning(issues: JiraIssue[], projectType: string, googleSheetsData: GoogleSheetsData | null): Promise<PlanningResult> {
     // Implementatie van calculatePlanning
     return {
         sprintCapacity: [],
@@ -1195,7 +1213,10 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
                         jql += ` AND ${projectConfig.worklogJql}`;
                     }
                     
-                    logger.log(`JQL query voor ${config.columnName}: ${jql}`);
+                    logger.log(`\n=== JQL Query voor kolom zonder issuefilter ===`);
+                    logger.log(`Project: ${projectConfig.projectName}`);
+                    logger.log(`Kolom: ${config.columnName}`);
+                    logger.log(`JQL: ${jql}`);
                     
                     // Haal worklogs op voor deze kolom
                     columnWorklogs = await getWorkLogsForProject(
@@ -1286,15 +1307,22 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
                     // Bereken waarden voor kolommen zonder issuefilter
                     configs.forEach(config => {
                         if (!config.issues || config.issues.length === 0) {
-                            // Zet alle worklogs in de kolom zonder issuefilter
-                            employeeCategories.set(config.columnName, alleWorklogs);
+                            // Bereken totaal van alle kolommen met issuefilter
+                            const totaalIssuefilterKolommen = kolommenMetIssuefilter.reduce((sum, issueConfig) => {
+                                return sum + (employeeCategories.get(issueConfig.columnName) || 0);
+                            }, 0);
                             
-                            // Log de waarde
+                            // Trek de waarden van kolommen met issuefilter af van alle worklogs
+                            const waarde = alleWorklogs - totaalIssuefilterKolommen;
+                            
+                            // Zet de berekende waarde in de kolom zonder issuefilter
+                            employeeCategories.set(config.columnName, waarde);
+                            
+                            // Log de berekening
                             logger.log(`\nBerekening voor ${employee} - ${config.columnName}:`);
-                            logger.log(`- Waarde (alle worklogs): ${alleWorklogs}`);
-                            
-                            // Geen aftrekking meer van andere kolommen
-                            logger.log(`- ${config.columnName} (berekend): ${employeeCategories.get(config.columnName) || 0}`);
+                            logger.log(`- Alle worklogs: ${alleWorklogs}`);
+                            logger.log(`- Totaal kolommen met issuefilter: ${totaalIssuefilterKolommen}`);
+                            logger.log(`- Berekende waarde: ${waarde}`);
                         }
                     });
                 });
@@ -1314,22 +1342,31 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
                             <tbody>
                         `;
 
+                        // Maak een map om de totalen per kolom bij te houden
+                        const columnTotals = new Map<string, number>();
+                        configs.forEach(config => {
+                            columnTotals.set(config.columnName, 0);
+                        });
+                        let grandTotal = 0;
+
                         // Toon resultaten per medewerker
                         projectHoursByEmployeeAndCategory.forEach((employeeCategories, employee) => {
                             worklogsTable += `<tr><td>${employee}</td>`;
-                            let totaal = 0;
+                            let employeeTotal = 0;
 
                             configs.forEach(config => {
                                 let hours = employeeCategories.get(config.columnName) || 0;
                                 
                                 // Voor de 'Ontwikkeling' kolom gebruiken we de berekende waarde
                                 if (config.columnName === 'Ontwikkeling') {
-                                    // De waarde is al berekend met 2x aftrek in de vorige stap
                                     hours = employeeCategories.get(config.columnName) || 0;
                                 }
                                 
-                                totaal += hours;
+                                employeeTotal += hours;
                                 worklogsTable += `<td>${hours.toFixed(1)}</td>`;
+                                
+                                // Update totaal voor deze kolom
+                                columnTotals.set(config.columnName, (columnTotals.get(config.columnName) || 0) + hours);
                                 
                                 // Voeg de uren toe aan de totale uren per medewerker en categorie
                                 if (!totalHoursByEmployeeAndCategory.has(employee)) {
@@ -1340,8 +1377,20 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
                                 totalEmployeeCategories.set(config.columnName, currentTotalHours + hours);
                             });
 
-                            worklogsTable += `<td>${totaal.toFixed(1)}</td></tr>`;
+                            grandTotal += employeeTotal;
+                            worklogsTable += `<td>${employeeTotal.toFixed(1)}</td></tr>`;
                         });
+
+                        // Voeg totaalregel toe
+                        worklogsTable += `
+                            <tr class="table-dark">
+                                <td><strong>Totaal</strong></td>
+                                ${configs.map(config => 
+                                    `<td><strong>${(columnTotals.get(config.columnName) || 0).toFixed(1)}</strong></td>`
+                                ).join('')}
+                                <td><strong>${grandTotal.toFixed(1)}</strong></td>
+                            </tr>
+                        `;
 
                         worklogsTable += `
                             </tbody>
@@ -1391,3 +1440,102 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
         res.status(500).json({ error: 'Er is een fout opgetreden bij het ophalen van de worklogs' });
     }
 });
+
+function generateHtml(
+    projectIssues: Record<string, JiraIssue[]>,
+    projectPlanning: Record<string, PlanningResult>,
+    googleSheetsData: GoogleSheetsData,
+    worklogs: WorkLog[],
+    sprintNames: string[]
+): string {
+    const projectNames = Object.keys(projectPlanning);
+    
+    let html = `
+        <!DOCTYPE html>
+        <html lang="nl">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Planning Overzicht</title>
+            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+        </head>
+        <body>
+            <div class="container-fluid">
+                <ul class="nav nav-tabs" id="projectTabs" role="tablist">
+                    ${projectNames.map((projectName, index) => `
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link ${index === 0 ? 'active' : ''}" 
+                                    id="project-${index}-tab" 
+                                    data-bs-toggle="tab" 
+                                    data-bs-target="#project-${index}" 
+                                    type="button" 
+                                    role="tab">
+                                ${projectName}
+                            </button>
+                        </li>
+                    `).join('')}
+                </ul>
+                
+                <div class="tab-content" id="projectTabContent">
+                    ${projectNames.map((projectName, index) => {
+                        const planning = projectPlanning[projectName];
+                        return `
+                            <div class="tab-pane fade ${index === 0 ? 'show active' : ''}" 
+                                 id="project-${index}" 
+                                 role="tabpanel">
+                                <h2>${projectName}</h2>
+                                ${generateSprintHoursTable(planning.sprintCapacity, planning.employeeSprintUsedHours, googleSheetsData, worklogs, sprintNames)}
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            </div>
+            <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+        </body>
+        </html>
+    `;
+    return html;
+}
+
+function generateSprintHoursTable(
+    sprintCapacity: SprintCapacity[],
+    employeeSprintUsedHours: {
+        employee: string;
+        sprintHours: {
+            sprint: string;
+            hours: number;
+            issues: { key: string; hours: number }[];
+        }[];
+    }[],
+    googleSheetsData: GoogleSheetsData,
+    worklogs: WorkLog[],
+    sprintNames: string[]
+): string {
+    let html = `
+        <table class="table table-striped table-bordered">
+            <thead>
+                <tr>
+                    <th>Medewerker</th>
+                    ${sprintNames.map(sprint => `<th>${sprint}</th>`).join('')}
+                </tr>
+            </thead>
+            <tbody>
+                ${employeeSprintUsedHours.map(employee => {
+                    const employeeCapacity = sprintCapacity.filter(cap => cap.employee === employee.employee);
+                    return `
+                        <tr>
+                            <td>${employee.employee}</td>
+                            ${sprintNames.map(sprint => {
+                                const sprintData = employee.sprintHours.find(sh => sh.sprint === sprint);
+                                const capacity = employeeCapacity.find(cap => cap.sprint === sprint)?.capacity || 0;
+                                const hours = sprintData?.hours || 0;
+                                return `<td>${hours} / ${capacity}</td>`;
+                            }).join('')}
+                        </tr>
+                    `;
+                }).join('')}
+            </tbody>
+        </table>
+    `;
+    return html;
+}
