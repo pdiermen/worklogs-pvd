@@ -18,7 +18,6 @@ import {
     WorkLog, 
     EmployeeResult, 
     SprintResult, 
-    GoogleSheetsData, 
     WorklogConfig,
     EfficiencyData,
     JiraIssue
@@ -151,7 +150,8 @@ app.get('/', async (req, res) => {
         // Verwerk elk project
         for (const projectConfig of projectConfigs) {
             const issues = await getIssues(projectConfig.jqlFilter);
-            const planning = await calculatePlanning(issues, projectConfig.projectName, googleSheetsData);
+            const jiraIssues = convertIssuesToJiraIssues(issues);
+            const planning = await calculatePlanning(jiraIssues, projectConfig.projectName, googleSheetsData);
             const sprintNames = await getSprintNamesFromSheet(googleSheetsData);
             
             html += generatePlanningTable(planning, sprintNames);
@@ -272,18 +272,16 @@ async function calculateEfficiency(issues: JiraIssue[], worklogs: WorkLog[], sta
     const efficiencyData: EfficiencyData[] = [];
     worklogsByEmployee.forEach((employeeWorklogs, employeeName) => {
         // Filter issues voor deze medewerker
-        const employeeIssues = allClosedIssues.filter((issue: JiraIssue) => 
-            issue.fields?.assignee?.displayName === employeeName
+        const employeeIssues = allClosedIssues.filter((issue: any) => 
+            issue.fields && issue.fields.assignee && issue.fields.assignee.displayName === employeeName
         );
 
         // Bereken totale geschatte uren en verzamel issue details
         let totalEstimatedHours = 0;
-        const issueKeys: string[] = [];
         const issueDetails: { key: string; estimatedHours: number; loggedHours: number }[] = [];
 
         employeeIssues.forEach(issue => {
             const issueKey = issue.key;
-            issueKeys.push(issueKey);
             
             // Bereken geschatte uren voor dit issue
             const estimatedHours = issue.fields?.timeoriginalestimate 
@@ -315,12 +313,13 @@ async function calculateEfficiency(issues: JiraIssue[], worklogs: WorkLog[], sta
         const efficiency = totalEstimatedHours > 0 ? (totalLoggedHours / totalEstimatedHours) * 100 : 0;
 
         efficiencyData.push({
-            assignee: employeeName,
+            employee: employeeName,
             estimatedHours: Number(totalEstimatedHours.toFixed(1)),
             loggedHours: Number(totalLoggedHours.toFixed(1)),
             efficiency: Number(efficiency.toFixed(1)),
-            issueKeys: issueKeys,
-            issueDetails: issueDetails
+            totalHours: 0,
+            nonWorkingHours: 0,
+            nonIssueHours: 0
         });
     });
 
@@ -890,7 +889,8 @@ app.get('/planning', async (req, res) => {
         }
 
         const issues = await getIssues(projectConfig.jqlFilter);
-        const planning = await calculatePlanning(issues, projectType, googleSheetsData);
+        const jiraIssues = convertIssuesToJiraIssues(issues);
+        const planning = await calculatePlanning(jiraIssues, projectType, googleSheetsData);
         const sprintNames = await getSprintNamesFromSheet(googleSheetsData);
 
         let html = `
@@ -1143,7 +1143,7 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
             if (!worklogGroups.has(config.worklogName)) {
                 worklogGroups.set(config.worklogName, []);
             }
-            worklogGroups.get(config.worklogName)!.push(config);
+            worklogGroups.get(config.worklogName)!.push({ ...config, projectName: config.projectName || '' });
         });
         logger.log(`Aantal worklog groepen: ${worklogGroups.size}`);
 
@@ -1198,22 +1198,33 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
                     
                      
                     // Bouw de JQL query
-                    let jql = `project in (${projectConfig.projectCodes.map(code => `"${code}"`).join(', ')})`;
-                    
-                    // Voeg periode filter toe
-                    jql += ` AND worklogDate >= "${parsedStartDate.toISOString().split('T')[0]}" AND worklogDate <= "${parsedEndDate.toISOString().split('T')[0]}"`;
+                    let jql = '';
                     
                     // Voeg issue filter toe voor kolommen met issues
                     if (config.issues && config.issues.length > 0) {
-                        jql += ` AND ${config.issues[0]}`;
+                        let issueFilter = config.issues[0];
+                        // Vervang {startDate} en {endDate} in het issuefilter
+                        issueFilter = issueFilter.replace('{startDate}', `"${parsedStartDate.toISOString().split('T')[0]}"`);
+                        issueFilter = issueFilter.replace('{endDate}', `"${parsedEndDate.toISOString().split('T')[0]}"`);
+                        // Vervang {projectFilter} en {periodeFilter} in het issuefilter
+                        const projectFilter = `project in (${projectConfig.projectCodes.map(code => `"${code}"`).join(', ')})`;
+                        const periodeFilter = `worklogDate >= "${parsedStartDate.toISOString().split('T')[0]}" AND worklogDate <= "${parsedEndDate.toISOString().split('T')[0]}"`;
+                        issueFilter = issueFilter.replace('{projectFilter}', projectFilter);
+                        issueFilter = issueFilter.replace('{periodeFilter}', periodeFilter);
+                        jql = issueFilter;
                     }
-                    
                     // Voeg worklogJql toe als filter voor kolommen zonder issuefilter
-                    if ((!config.issues || config.issues.length === 0) && projectConfig.worklogJql) {
-                        jql += ` AND ${projectConfig.worklogJql}`;
+                    else if (projectConfig.worklogJql) {
+                        let worklogJql = projectConfig.worklogJql;
+                        // Vervang {projectFilter} en {periodeFilter} in het worklogJql
+                        const projectFilter = `project in (${projectConfig.projectCodes.map(code => `"${code}"`).join(', ')})`;
+                        const periodeFilter = `worklogDate >= "${parsedStartDate.toISOString().split('T')[0]}" AND worklogDate <= "${parsedEndDate.toISOString().split('T')[0]}"`;
+                        worklogJql = worklogJql.replace('{projectFilter}', projectFilter);
+                        worklogJql = worklogJql.replace('{periodeFilter}', periodeFilter);
+                        jql = worklogJql;
                     }
                     
-                    logger.log(`\n=== JQL Query voor kolom zonder issuefilter ===`);
+                    logger.log(`\n=== JQL Query voor kolom ===`);
                     logger.log(`Project: ${projectConfig.projectName}`);
                     logger.log(`Kolom: ${config.columnName}`);
                     logger.log(`JQL: ${jql}`);
@@ -1538,4 +1549,23 @@ function generateSprintHoursTable(
         </table>
     `;
     return html;
+}
+
+// Hulpfunctie om Issue[] om te zetten naar JiraIssue[]
+function convertIssuesToJiraIssues(issues: Issue[]): JiraIssue[] {
+    return issues
+        .filter(issue => issue.fields && issue.fields.summary && issue.fields.priority && issue.fields.assignee)
+        .map(issue => ({
+            id: issue.key,
+            key: issue.key,
+            fields: {
+                summary: issue.fields!.summary!,
+                priority: issue.fields!.priority!,
+                assignee: issue.fields!.assignee!,
+                timeestimate: issue.fields!.timeestimate || 0,
+                status: issue.fields!.status,
+                timeoriginalestimate: issue.fields!.timeoriginalestimate,
+                worklog: issue.fields!.worklog as any // eventueel aanpassen indien nodig
+            }
+        }));
 }

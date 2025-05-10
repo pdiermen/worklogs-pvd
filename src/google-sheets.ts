@@ -123,6 +123,7 @@ export interface WorklogConfig {
     worklogName: string;
     columnName: string;
     issues: string[];
+    projectName?: string;
 }
 
 export async function getWorklogConfigsFromSheet(): Promise<WorklogConfig[]> {
@@ -145,6 +146,7 @@ export async function getWorklogConfigsFromSheet(): Promise<WorklogConfig[]> {
             const [worklogName, columnName, issues] = row;
             if (worklogName && columnName) {
                 configs.push({
+                    projectName: worklogName || '',
                     worklogName,
                     columnName,
                     issues: issues ? issues.split(',').map((issue: string) => issue.trim()) : []

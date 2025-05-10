@@ -77,6 +77,10 @@ export interface WorkLog {
     started: string;
     issueKey: string;
     comment?: string;
+    issueSummary?: string;
+    issueStatus?: string;
+    issueAssignee?: string;
+    issuePriority?: string;
 }
 
 export interface EfficiencyData {
@@ -85,6 +89,9 @@ export interface EfficiencyData {
     nonWorkingHours: number;
     nonIssueHours: number;
     efficiency: number;
+    assignee?: string;
+    estimatedHours?: number;
+    loggedHours?: number;
 }
 
 export interface EfficiencyTable {
@@ -198,4 +205,6 @@ export interface Worklog {
         displayName: string;
     };
     comment?: string;
-} 
+}
+
+export type GoogleSheetsData = (string | null)[][]; 
