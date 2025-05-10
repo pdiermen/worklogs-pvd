@@ -90,7 +90,7 @@ export async function getActiveIssues(): Promise<Issue[]> {
             params: {
                 jql: 'project in (SUBSCRIPTION, ATLANTIS) AND status in (Open, "In Progress", "To Do")',
                 expand: 'changelog,issuelinks',
-                fields: 'summary,status,assignee,issuelinks,timeoriginalestimate,customfield_10020,project,priority,created,worklog',
+                fields: 'summary,status,assignee,issuelinks,timeoriginalestimate,customfield_10020,project,priority,created',
                 maxResults,
                 startAt
             }
@@ -102,6 +102,42 @@ export async function getActiveIssues(): Promise<Issue[]> {
         logger.log(`Aantal issues gevonden in deze batch: ${issues.length}`);
         logger.log(`Totaal aantal issues tot nu toe: ${allIssues.length}`);
         logger.log(`Totaal aantal issues volgens Jira: ${totalIssues}`);
+        
+        // Haal voor elk issue de worklogs op met paginering
+        for (const issue of issues) {
+            try {
+                let worklogStartAt = 0;
+                const worklogMaxResults = 100;
+                let hasMoreWorklogs = true;
+                let allIssueWorklogs: any[] = [];
+
+                while (hasMoreWorklogs) {
+                    const worklogResponse = await jiraClient.get(`/issue/${issue.key}/worklog`, {
+                        params: {
+                            startAt: worklogStartAt,
+                            maxResults: worklogMaxResults
+                        }
+                    });
+                    
+                    const issueWorklogs = worklogResponse.data.worklogs || [];
+                    allIssueWorklogs.push(...issueWorklogs);
+                    
+                    const totalWorklogs = worklogResponse.data.total;
+                    hasMoreWorklogs = allIssueWorklogs.length < totalWorklogs;
+                    
+                    if (hasMoreWorklogs) {
+                        worklogStartAt += worklogMaxResults;
+                        logger.log(`Meer worklogs beschikbaar voor issue ${issue.key}, ophalen volgende batch...`);
+                    }
+                }
+                
+                // Voeg de worklogs toe aan het issue object
+                issue.fields.worklog = { worklogs: allIssueWorklogs };
+            } catch (error) {
+                logger.error(`Error bij ophalen worklogs voor issue ${issue.key}: ${error}`);
+                // Ga door met de volgende issue
+            }
+        }
         
         allIssues.push(...issues);
         
@@ -168,26 +204,61 @@ export async function getWorkLogs(projectKey: string, startDate: string, endDate
             logger.log(`Totaal aantal issues volgens Jira: ${totalIssues}`);
             
             for (const issue of issues) {
-                const issueWorklogs = issue.fields.worklog?.worklogs || [];
-                
-                for (const log of issueWorklogs) {
-                    const logDate = new Date(log.started);
-                    const start = new Date(startDate);
-                    const end = new Date(endDate);
-                    
-                    if (logDate >= start && logDate <= end) {
-                        worklogs.push({
-                            issueKey: issue.key,
-                            issueSummary: issue.fields.summary,
-                            issueStatus: issue.fields.status.name,
-                            issueAssignee: issue.fields.assignee?.displayName || 'Onbekend',
-                            issuePriority: issue.fields.priority?.name || 'Lowest',
-                            author: typeof log.author === 'string' ? log.author : log.author.displayName,
-                            timeSpentSeconds: log.timeSpentSeconds,
-                            started: log.started,
-                            comment: log.comment
-                        });
+                try {
+                    let worklogStartAt = 0;
+                    const worklogMaxResults = 100;
+                    let hasMoreWorklogs = true;
+                    let allIssueWorklogs: any[] = [];
+
+                    while (hasMoreWorklogs) {
+                        const worklogResponse = await axios.get(
+                            `https://${JIRA_DOMAIN}/rest/api/3/issue/${issue.key}/worklog`,
+                            {
+                                headers: {
+                                    'Authorization': `Basic ${Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString('base64')}`,
+                                    'Content-Type': 'application/json'
+                                },
+                                params: {
+                                    startAt: worklogStartAt,
+                                    maxResults: worklogMaxResults
+                                }
+                            }
+                        );
+                        
+                        const issueWorklogs = worklogResponse.data.worklogs || [];
+                        allIssueWorklogs.push(...issueWorklogs);
+                        
+                        const totalWorklogs = worklogResponse.data.total;
+                        hasMoreWorklogs = allIssueWorklogs.length < totalWorklogs;
+                        
+                        if (hasMoreWorklogs) {
+                            worklogStartAt += worklogMaxResults;
+                            logger.log(`Meer worklogs beschikbaar voor issue ${issue.key}, ophalen volgende batch...`);
+                        }
                     }
+                    
+                    for (const log of allIssueWorklogs) {
+                        const logDate = new Date(log.started);
+                        const start = new Date(startDate);
+                        const end = new Date(endDate);
+                        
+                        if (logDate >= start && logDate <= end) {
+                            worklogs.push({
+                                issueKey: issue.key,
+                                issueSummary: issue.fields.summary,
+                                issueStatus: issue.fields.status.name,
+                                issueAssignee: issue.fields.assignee?.displayName || 'Onbekend',
+                                issuePriority: issue.fields.priority?.name || 'Lowest',
+                                author: typeof log.author === 'string' ? log.author : log.author.displayName,
+                                timeSpentSeconds: log.timeSpentSeconds,
+                                started: log.started,
+                                comment: log.comment
+                            });
+                        }
+                    }
+                } catch (error) {
+                    logger.error(`Error bij ophalen worklogs voor issue ${issue.key}: ${error}`);
+                    // Ga door met de volgende issue
                 }
             }
             
@@ -389,6 +460,42 @@ export async function getIssuesForProject(projectCodes: string[], jqlFilter?: st
             }
         }));
 
+        // Haal voor elk issue de worklogs op met paginering
+        for (const issue of issues) {
+            try {
+                let worklogStartAt = 0;
+                const worklogMaxResults = 100;
+                let hasMoreWorklogs = true;
+                let allIssueWorklogs: any[] = [];
+
+                while (hasMoreWorklogs) {
+                    const worklogResponse = await jiraClient.get(`/issue/${issue.key}/worklog`, {
+                        params: {
+                            startAt: worklogStartAt,
+                            maxResults: worklogMaxResults
+                        }
+                    });
+                    
+                    const issueWorklogs = worklogResponse.data.worklogs || [];
+                    allIssueWorklogs.push(...issueWorklogs);
+                    
+                    const totalWorklogs = worklogResponse.data.total;
+                    hasMoreWorklogs = allIssueWorklogs.length < totalWorklogs;
+                    
+                    if (hasMoreWorklogs) {
+                        worklogStartAt += worklogMaxResults;
+                        logger.log(`Meer worklogs beschikbaar voor issue ${issue.key}, ophalen volgende batch...`);
+                    }
+                }
+                
+                // Voeg de worklogs toe aan het issue object
+                issue.fields.worklog = { worklogs: allIssueWorklogs };
+            } catch (error) {
+                logger.error(`Error bij ophalen worklogs voor issue ${issue.key}: ${error}`);
+                // Ga door met de volgende issue
+            }
+        }
+
         allIssues.push(...issues);
         totalIssues = response.data.total;
         
@@ -493,18 +600,40 @@ export async function getWorkLogsForProject(
         // Haal voor elk issue de worklogs op
         for (const issue of allIssues) {
             try {
-                const worklogResponse = await jiraClient.get(`/issue/${issue.key}/worklog`);
-                const issueWorklogs = (worklogResponse.data.worklogs || []) as JiraWorkLog[];
+                let worklogStartAt = 0;
+                const worklogMaxResults = 100;
+                let hasMoreWorklogs = true;
+                let allIssueWorklogs: JiraWorkLog[] = [];
+
+                while (hasMoreWorklogs) {
+                    const worklogResponse = await jiraClient.get(`/issue/${issue.key}/worklog`, {
+                        params: {
+                            startAt: worklogStartAt,
+                            maxResults: worklogMaxResults
+                        }
+                    });
+                    
+                    const issueWorklogs = (worklogResponse.data.worklogs || []) as JiraWorkLog[];
+                    allIssueWorklogs.push(...issueWorklogs);
+                    
+                    const totalWorklogs = worklogResponse.data.total;
+                    hasMoreWorklogs = allIssueWorklogs.length < totalWorklogs;
+                    
+                    if (hasMoreWorklogs) {
+                        worklogStartAt += worklogMaxResults;
+                        logger.log(`Meer worklogs beschikbaar voor issue ${issue.key}, ophalen volgende batch...`);
+                    }
+                }
                 
-                if (issueWorklogs.length > 0) {
+                if (allIssueWorklogs.length > 0) {
                     // Filter worklogs op basis van de datum
-                    const filteredWorklogs = issueWorklogs.filter((log: JiraWorkLog) => {
+                    const filteredWorklogs = allIssueWorklogs.filter((log: JiraWorkLog) => {
                         const logDate = new Date(log.started);
                         return logDate >= startDate && logDate <= endDate;
                     });
 
                     if (filteredWorklogs.length > 0) {
-                           const processedWorklogs = filteredWorklogs.map((log: JiraWorkLog) => ({
+                        const processedWorklogs = filteredWorklogs.map((log: JiraWorkLog) => ({
                             issueKey: issue.key,
                             issue: {
                                 key: issue.key,
@@ -525,6 +654,7 @@ export async function getWorkLogsForProject(
                         }));
                         
                         worklogs.push(...processedWorklogs);
+                        logger.log(`Issue ${issue.key}: ${filteredWorklogs.length} worklogs gevonden in de opgegeven periode`);
                     } else {
                         logger.log(`Issue ${issue.key}: Geen worklogs gevonden in de opgegeven periode`);
                     }
@@ -534,7 +664,6 @@ export async function getWorkLogsForProject(
             } catch (error) {
                 logger.error(`Error bij ophalen worklogs voor issue ${issue.key}: ${error}`);
                 // Ga door met de volgende issue
-                continue;
             }
         }
 
@@ -579,21 +708,57 @@ export async function getWorklogsForIssues(issues: Issue[]): Promise<WorkLog[]> 
             
             // Verwerk worklogs voor elke issue
             for (const issue of batchIssues) {
-                const issueWorklogs = issue.fields.worklog?.worklogs || [];
-                logger.log(`Issue ${issue.key}: ${issueWorklogs.length} worklogs gevonden`);
-                
-                for (const log of issueWorklogs) {
-                    worklogs.push({
-                        issueKey: issue.key,
-                        issueSummary: issue.fields.summary,
-                        issueStatus: issue.fields.status.name,
-                        issueAssignee: issue.fields.assignee?.displayName || 'Onbekend',
-                        issuePriority: issue.fields.priority?.name || 'Lowest',
-                        author: typeof log.author === 'string' ? log.author : log.author.displayName,
-                        timeSpentSeconds: log.timeSpentSeconds,
-                        started: log.started,
-                        comment: log.comment
-                    });
+                try {
+                    let worklogStartAt = 0;
+                    const worklogMaxResults = 100;
+                    let hasMoreWorklogs = true;
+                    let allIssueWorklogs: any[] = [];
+
+                    while (hasMoreWorklogs) {
+                        const worklogResponse = await axios.get(
+                            `https://${JIRA_DOMAIN}/rest/api/3/issue/${issue.key}/worklog`,
+                            {
+                                headers: {
+                                    'Authorization': `Basic ${Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString('base64')}`,
+                                    'Content-Type': 'application/json'
+                                },
+                                params: {
+                                    startAt: worklogStartAt,
+                                    maxResults: worklogMaxResults
+                                }
+                            }
+                        );
+                        
+                        const issueWorklogs = worklogResponse.data.worklogs || [];
+                        allIssueWorklogs.push(...issueWorklogs);
+                        
+                        const totalWorklogs = worklogResponse.data.total;
+                        hasMoreWorklogs = allIssueWorklogs.length < totalWorklogs;
+                        
+                        if (hasMoreWorklogs) {
+                            worklogStartAt += worklogMaxResults;
+                            logger.log(`Meer worklogs beschikbaar voor issue ${issue.key}, ophalen volgende batch...`);
+                        }
+                    }
+                    
+                    logger.log(`Issue ${issue.key}: ${allIssueWorklogs.length} worklogs gevonden`);
+                    
+                    for (const log of allIssueWorklogs) {
+                        worklogs.push({
+                            issueKey: issue.key,
+                            issueSummary: issue.fields.summary,
+                            issueStatus: issue.fields.status.name,
+                            issueAssignee: issue.fields.assignee?.displayName || 'Onbekend',
+                            issuePriority: issue.fields.priority?.name || 'Lowest',
+                            author: typeof log.author === 'string' ? log.author : log.author.displayName,
+                            timeSpentSeconds: log.timeSpentSeconds,
+                            started: log.started,
+                            comment: log.comment
+                        });
+                    }
+                } catch (error) {
+                    logger.error(`Error bij ophalen worklogs voor issue ${issue.key}: ${error}`);
+                    // Ga door met de volgende issue
                 }
             }
             
@@ -647,8 +812,7 @@ export async function getIssuesWithWorklogs(startDate: string, endDate: string):
                             'timeoriginalestimate',
                             'issuelinks',
                             'parent',
-                            'customfield_10020',
-                            'worklog'
+                            'customfield_10020'
                         ].join(','),
                         startAt,
                         maxResults
@@ -663,6 +827,49 @@ export async function getIssuesWithWorklogs(startDate: string, endDate: string):
             logger.log(`Aantal issues gevonden in deze batch: ${batchIssues.length}`);
             logger.log(`Totaal aantal issues tot nu toe: ${allIssues.length}`);
             logger.log(`Totaal aantal issues volgens Jira: ${totalIssues}`);
+            
+            // Haal voor elk issue de worklogs op met paginering
+            for (const issue of batchIssues) {
+                try {
+                    let worklogStartAt = 0;
+                    const worklogMaxResults = 100;
+                    let hasMoreWorklogs = true;
+                    let allIssueWorklogs: any[] = [];
+
+                    while (hasMoreWorklogs) {
+                        const worklogResponse = await axios.get(
+                            `https://${JIRA_DOMAIN}/rest/api/3/issue/${issue.key}/worklog`,
+                            {
+                                headers: {
+                                    'Authorization': `Basic ${Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString('base64')}`,
+                                    'Content-Type': 'application/json'
+                                },
+                                params: {
+                                    startAt: worklogStartAt,
+                                    maxResults: worklogMaxResults
+                                }
+                            }
+                        );
+                        
+                        const issueWorklogs = worklogResponse.data.worklogs || [];
+                        allIssueWorklogs.push(...issueWorklogs);
+                        
+                        const totalWorklogs = worklogResponse.data.total;
+                        hasMoreWorklogs = allIssueWorklogs.length < totalWorklogs;
+                        
+                        if (hasMoreWorklogs) {
+                            worklogStartAt += worklogMaxResults;
+                            logger.log(`Meer worklogs beschikbaar voor issue ${issue.key}, ophalen volgende batch...`);
+                        }
+                    }
+                    
+                    // Voeg de worklogs toe aan het issue object
+                    issue.fields.worklog = { worklogs: allIssueWorklogs };
+                } catch (error) {
+                    logger.error(`Error bij ophalen worklogs voor issue ${issue.key}: ${error}`);
+                    // Ga door met de volgende issue
+                }
+            }
             
             hasMore = allIssues.length < totalIssues;
             if (hasMore) {
@@ -715,6 +922,42 @@ export async function getIssues(jql: string): Promise<Issue[]> {
             logger.log(`Aantal issues gevonden in deze batch: ${issues.length}`);
             logger.log(`Totaal aantal issues tot nu toe: ${allIssues.length}`);
             logger.log(`Totaal aantal issues volgens Jira: ${totalIssues}`);
+            
+            // Haal voor elk issue de worklogs op met paginering
+            for (const issue of issues) {
+                try {
+                    let worklogStartAt = 0;
+                    const worklogMaxResults = 100;
+                    let hasMoreWorklogs = true;
+                    let allIssueWorklogs: any[] = [];
+
+                    while (hasMoreWorklogs) {
+                        const worklogResponse = await jiraClient.get(`/issue/${issue.key}/worklog`, {
+                            params: {
+                                startAt: worklogStartAt,
+                                maxResults: worklogMaxResults
+                            }
+                        });
+                        
+                        const issueWorklogs = worklogResponse.data.worklogs || [];
+                        allIssueWorklogs.push(...issueWorklogs);
+                        
+                        const totalWorklogs = worklogResponse.data.total;
+                        hasMoreWorklogs = allIssueWorklogs.length < totalWorklogs;
+                        
+                        if (hasMoreWorklogs) {
+                            worklogStartAt += worklogMaxResults;
+                            logger.log(`Meer worklogs beschikbaar voor issue ${issue.key}, ophalen volgende batch...`);
+                        }
+                    }
+                    
+                    // Voeg de worklogs toe aan het issue object
+                    issue.fields.worklog = { worklogs: allIssueWorklogs };
+                } catch (error) {
+                    logger.error(`Error bij ophalen worklogs voor issue ${issue.key}: ${error}`);
+                    // Ga door met de volgende issue
+                }
+            }
             
             allIssues.push(...issues);
             
