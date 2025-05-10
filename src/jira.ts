@@ -238,9 +238,9 @@ export async function getWorkLogs(projectKey: string, startDate: string, endDate
                     }
                     
                     for (const log of allIssueWorklogs) {
-                        const logDate = new Date(log.started);
-                        const start = new Date(startDate);
-                        const end = new Date(endDate);
+                        const logDate = new Date(log.started).toISOString().split('T')[0];
+                        const start = new Date(startDate).toISOString().split('T')[0];
+                        const end = new Date(endDate).toISOString().split('T')[0];
                         
                         if (logDate >= start && logDate <= end) {
                             worklogs.push({
@@ -542,9 +542,9 @@ export async function getWorkLogsForProject(
         let jqlFilter = config.jqlFilter;
         // Vervang {projectFilter} en {periodeFilter} in het jqlFilter
         const projectFilter = `project in (${projectCodes.map(code => `"${code}"`).join(',')})`;
-        const periodeFilter = `worklogDate >= "${startDate.toISOString().split('T')[0]}" AND worklogDate <= "${endDate.toISOString().split('T')[0]}"`;
+        // Verwijder de periodeFilter uit de JQL query, we filteren later op worklog datum
         jqlFilter = jqlFilter.replace('{projectFilter}', projectFilter);
-        jqlFilter = jqlFilter.replace('{periodeFilter}', periodeFilter);
+        jqlFilter = jqlFilter.replace('{periodeFilter}', '');
         jql = jqlFilter;
     }
     // Als er een worklogJql is, voeg deze toe
@@ -552,9 +552,9 @@ export async function getWorkLogsForProject(
         let worklogJql = config.worklogJql;
         // Vervang {projectFilter} en {periodeFilter} in het worklogJql
         const projectFilter = `project in (${projectCodes.map(code => `"${code}"`).join(',')})`;
-        const periodeFilter = `worklogDate >= "${startDate.toISOString().split('T')[0]}" AND worklogDate <= "${endDate.toISOString().split('T')[0]}"`;
+        // Verwijder de periodeFilter uit de JQL query, we filteren later op worklog datum
         worklogJql = worklogJql.replace('{projectFilter}', projectFilter);
-        worklogJql = worklogJql.replace('{periodeFilter}', periodeFilter);
+        worklogJql = worklogJql.replace('{periodeFilter}', '');
         jql = worklogJql;
     }
 
@@ -628,8 +628,10 @@ export async function getWorkLogsForProject(
                 if (allIssueWorklogs.length > 0) {
                     // Filter worklogs op basis van de datum
                     const filteredWorklogs = allIssueWorklogs.filter((log: JiraWorkLog) => {
-                        const logDate = new Date(log.started);
-                        return logDate >= startDate && logDate <= endDate;
+                        const logDate = new Date(log.started).toISOString().split('T')[0];
+                        const start = startDate.toISOString().split('T')[0];
+                        const end = endDate.toISOString().split('T')[0];
+                        return logDate >= start && logDate <= end;
                     });
 
                     if (filteredWorklogs.length > 0) {
