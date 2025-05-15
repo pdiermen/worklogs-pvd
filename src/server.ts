@@ -1239,7 +1239,7 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
                     
                     // Log worklogs per issue
                     logger.log(`\nWorklogs voor kolom ${config.columnName}:`);
-                    const worklogsByIssue = new Map<string, { author: string; hours: number }[]>();
+                    const worklogsByIssue = new Map<string, { author: string; hours: number; started: string }[]>();
                     columnWorklogs.forEach(log => {
                         const authorName = typeof log.author === 'string' ? log.author : log.author.displayName;
                         const hours = log.timeSpentSeconds / 3600;
@@ -1253,13 +1253,14 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
                         if (!worklogsByIssue.has(log.issueKey)) {
                             worklogsByIssue.set(log.issueKey, []);
                         }
-                        worklogsByIssue.get(log.issueKey)!.push({ author: authorName, hours });
+                        worklogsByIssue.get(log.issueKey)!.push({ author: authorName, hours, started: log.started });
                     });
                     
                     worklogsByIssue.forEach((logs, issueKey) => {
                         logger.log(`\nIssue: ${issueKey}`);
                         logs.forEach(log => {
-                            logger.log(`- ${log.author}: ${log.hours.toFixed(1)} uur`);
+                            const logDate = new Date(log.started).toISOString().split('T')[0];
+                            logger.log(`- ${log.author}: ${log.hours.toFixed(1)} uur (${logDate})`);
                         });
                     });
                     
