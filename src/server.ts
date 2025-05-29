@@ -240,9 +240,22 @@ async function calculateEfficiency(issues: JiraIssue[], worklogs: WorkLog[], sta
         }
     });
     
+    // Debug logging voor projectcodes
+    logger.log('Projectcodes voor efficiëntie berekening:');
+    logger.log(Array.from(projectCodes).join(', '));
+    
     // Bouw de JQL query met projectcodes
     const projectFilter = Array.from(projectCodes).map(code => `project = ${code}`).join(' OR ');
+    
+    // Debug logging voor projectFilter
+    logger.log('Project filter voor efficiëntie berekening:');
+    logger.log(projectFilter);
+    
     const jql = `(${projectFilter}) AND resolutiondate >= "${startDate.toISOString().split('T')[0]}" AND resolutiondate <= "${endDate.toISOString().split('T')[0]}" AND status = Closed ORDER BY resolutiondate DESC`;
+    
+    // Debug logging voor uiteindelijke JQL
+    logger.log('Uiteindelijke JQL query voor efficiëntie berekening:');
+    logger.log(jql);
     
     logger.log(`JQL Query voor efficiency berekening: ${jql}`);
     const allClosedIssues = await getIssues(jql);
@@ -1125,6 +1138,21 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
             return res.status(400).json({ error: 'Start- en einddatum zijn verplicht' });
         }
 
+        // Valideer en parseer de datums
+        const parsedStartDate = new Date(startDate.toString());
+        const parsedEndDate = new Date(endDate.toString());
+
+        // Valideer dat de datums geldig zijn
+        if (isNaN(parsedStartDate.getTime())) {
+            return res.status(400).json({ error: 'Ongeldige startdatum' });
+        }
+        if (isNaN(parsedEndDate.getTime())) {
+            return res.status(400).json({ error: 'Ongeldige einddatum' });
+        }
+        if (parsedStartDate > parsedEndDate) {
+            return res.status(400).json({ error: 'Startdatum moet voor einddatum liggen' });
+        }
+
         logger.log('Start ophalen worklog configuraties...');
         // Haal worklog configuraties op
         const worklogConfigs = await getWorklogConfigsFromSheet();
@@ -1151,6 +1179,9 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
         const totalHoursByEmployeeAndCategory = new Map<string, Map<string, number>>();
         const allProjectWorklogs: WorkLog[] = [];
         
+        // Definieer periodeFilter één keer
+        const periodeFilter = `worklogDate >= "${parsedStartDate.toISOString().split('T')[0]}" AND worklogDate <= "${parsedEndDate.toISOString().split('T')[0]}"`;
+        
         // Verwerk de worklog groepen
         for await (const [worklogName, configs] of worklogGroups) {
             logger.log(`Verwerken worklog groep: ${worklogName}`);
@@ -1165,9 +1196,6 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
             // Verwerk elk project apart
             for await (const projectConfig of matchingProjects) {
                 logger.log(`Verwerken project: ${projectConfig.projectName}`);
-                // Parseer de start- en einddatum naar Date objecten
-                const parsedStartDate = new Date(startDate.toString());
-                const parsedEndDate = new Date(endDate.toString());
 
                 // Maak een map om de totale uren per medewerker en categorie bij te houden
                 const projectHoursByEmployeeAndCategory = new Map<string, Map<string, number>>();
@@ -1203,14 +1231,10 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
                     // Voeg issue filter toe voor kolommen met issues
                     if (config.issues && config.issues.length > 0) {
                         let issueFilter = config.issues[0];
-                        // Vervang {startDate} en {endDate} in het issuefilter
-                        issueFilter = issueFilter.replace('{startDate}', `"${parsedStartDate.toISOString().split('T')[0]}"`);
-                        issueFilter = issueFilter.replace('{endDate}', `"${parsedEndDate.toISOString().split('T')[0]}"`);
                         // Vervang {projectFilter} en {periodeFilter} in het issuefilter
                         const projectFilter = `project in (${projectConfig.projectCodes.map(code => `"${code}"`).join(', ')})`;
-                        const periodeFilter = `worklogDate >= "${parsedStartDate.toISOString().split('T')[0]}" AND worklogDate <= "${parsedEndDate.toISOString().split('T')[0]}"`;
-                        issueFilter = issueFilter.replace('{projectFilter}', projectFilter);
-                        issueFilter = issueFilter.replace('{periodeFilter}', periodeFilter);
+                        issueFilter = issueFilter.replace(/{projectFilter}/g, projectFilter);
+                        issueFilter = issueFilter.replace(/{periodeFilter}/g, periodeFilter);
                         jql = issueFilter;
                     }
                     // Voeg worklogJql toe als filter voor kolommen zonder issuefilter
@@ -1218,9 +1242,8 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
                         let worklogJql = projectConfig.worklogJql;
                         // Vervang {projectFilter} en {periodeFilter} in het worklogJql
                         const projectFilter = `project in (${projectConfig.projectCodes.map(code => `"${code}"`).join(', ')})`;
-                        const periodeFilter = `worklogDate >= "${parsedStartDate.toISOString().split('T')[0]}" AND worklogDate <= "${parsedEndDate.toISOString().split('T')[0]}"`;
-                        worklogJql = worklogJql.replace('{projectFilter}', projectFilter);
-                        worklogJql = worklogJql.replace('{periodeFilter}', periodeFilter);
+                        worklogJql = worklogJql.replace(/{projectFilter}/g, projectFilter);
+                        worklogJql = worklogJql.replace(/{periodeFilter}/g, periodeFilter);
                         jql = worklogJql;
                     }
                     
