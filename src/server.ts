@@ -222,7 +222,7 @@ interface IssueHistory {
     }[];
 }
 
-async function calculateEfficiency(issues: JiraIssue[], worklogs: WorkLog[], startDate: Date, endDate: Date): Promise<EfficiencyData[]> {
+async function calculateEfficiency(issues: JiraIssue[], startDate: Date, endDate: Date): Promise<EfficiencyData[]> {
     logger.log('Start calculateEfficiency functie');
     
     // Haal project configuraties op uit Google Sheet
@@ -261,12 +261,82 @@ async function calculateEfficiency(issues: JiraIssue[], worklogs: WorkLog[], sta
     const allClosedIssues = await getIssues(jql);
     
     logger.log(`Aantal afgesloten issues van alle projecten: ${allClosedIssues.length}`);
-    logger.log(`Aantal worklogs: ${worklogs.length}`);
     logger.log(`Periode: ${startDate.toISOString()} tot ${endDate.toISOString()}`);
+
+    // Haal worklogs op voor alle issues
+    const allWorklogs: WorkLog[] = [];
+    for (const issue of allClosedIssues) {
+        try {
+            let worklogStartAt = 0;
+            const worklogMaxResults = 100;
+            let hasMoreWorklogs = true;
+            let allIssueWorklogs: any[] = [];
+
+            while (hasMoreWorklogs) {
+                const worklogUrl = `/issue/${issue.key}/worklog`;
+                logger.log(`\nOphalen worklogs voor issue ${issue.key}:`);
+                logger.log(`- Worklog URL: ${worklogUrl}`);
+                logger.log(`- Parameters: startAt=${worklogStartAt}, maxResults=${worklogMaxResults}`);
+                
+                try {
+                    const worklogResponse = await jiraClient.get(worklogUrl, {
+                        params: {
+                            startAt: worklogStartAt,
+                            maxResults: worklogMaxResults
+                        }
+                    });
+                    
+                    const issueWorklogs = worklogResponse.data.worklogs || [];
+                    allIssueWorklogs.push(...issueWorklogs);
+                    
+                    const totalWorklogs = worklogResponse.data.total;
+                    hasMoreWorklogs = allIssueWorklogs.length < totalWorklogs;
+                    
+                    if (hasMoreWorklogs) {
+                        worklogStartAt += worklogMaxResults;
+                        logger.log(`- Meer worklogs beschikbaar, ophalen volgende batch...`);
+                    }
+                } catch (error: any) {
+                    logger.error(`Error bij ophalen worklogs voor issue ${issue.key}:`);
+                    logger.error(`- Worklog URL: ${worklogUrl}`);
+                    logger.error(`- Parameters: startAt=${worklogStartAt}, maxResults=${worklogMaxResults}`);
+                    logger.error(`- Error message: ${error.message}`);
+                    if (error.response?.data) {
+                        logger.error(`- Response data: ${JSON.stringify(error.response.data)}`);
+                    }
+                    throw error;
+                }
+            }
+            
+            // Verwerk alle worklogs voor dit issue, zonder datum filtering
+            if (allIssueWorklogs.length > 0) {
+                const processedWorklogs = allIssueWorklogs.map((log: any) => ({
+                    issueKey: issue.key,
+                    issueSummary: issue.fields?.summary || 'Geen samenvatting',
+                    issueStatus: issue.fields?.status?.name || 'Onbekend',
+                    issueAssignee: issue.fields?.assignee?.displayName || 'Onbekend',
+                    issuePriority: issue.fields?.priority?.name || 'Lowest',
+                    author: typeof log.author === 'string' ? log.author : log.author.displayName,
+                    timeSpentSeconds: log.timeSpentSeconds,
+                    started: log.started,
+                    comment: log.comment
+                }));
+                
+                allWorklogs.push(...processedWorklogs);
+                logger.log(`Issue ${issue.key}: ${allIssueWorklogs.length} worklogs gevonden`);
+            } else {
+                logger.log(`Issue ${issue.key}: Geen worklogs gevonden`);
+            }
+        } catch (error) {
+            logger.error(`Error bij ophalen worklogs voor issue ${issue.key}: ${error}`);
+        }
+    }
+
+    logger.log(`Totaal aantal worklogs gevonden: ${allWorklogs.length}`);
 
     // Groepeer worklogs per medewerker
     const worklogsByEmployee = new Map<string, WorkLog[]>();
-    worklogs.forEach(log => {
+    allWorklogs.forEach(log => {
         const employeeName = typeof log.author === 'string' ? 
             log.author : 
             (log.author && typeof log.author === 'object' && 'displayName' in log.author ? 
@@ -302,20 +372,25 @@ async function calculateEfficiency(issues: JiraIssue[], worklogs: WorkLog[], sta
                 : 0;
             totalEstimatedHours += estimatedHours;
 
-            // Bereken gelogde uren voor dit issue binnen de opgegeven periode
-            const loggedHours = employeeWorklogs
-                .filter(log => {
-                    const logDate = new Date(log.started);
-                    return log.issueKey === issueKey && 
-                           logDate >= startDate && 
-                           logDate <= endDate;
-                })
-                .reduce((total, log) => total + log.timeSpentSeconds / 3600, 0);
+            // Haal worklogs op voor dit issue
+            const issueWorklogs = employeeWorklogs.filter(log => log.issueKey === issueKey);
+
+            // Bereken gelogde uren voor dit issue
+            const loggedHours = issueWorklogs.reduce((total, log) => total + log.timeSpentSeconds / 3600, 0);
 
             issueDetails.push({
                 key: issueKey,
                 estimatedHours,
                 loggedHours
+            });
+
+            // Log de worklogs voor dit issue
+            logger.log(`\nIssue ${issueKey}:`);
+            logger.log(`- Geschatte uren: ${estimatedHours.toFixed(1)}`);
+            logger.log(`- Gelogde uren: ${loggedHours.toFixed(1)}`);
+            issueWorklogs.forEach(log => {
+                const logDate = new Date(log.started).toISOString().split('T')[0];
+                logger.log(`  - ${logDate}: ${(log.timeSpentSeconds / 3600).toFixed(1)} uur`);
             });
         });
 
@@ -334,11 +409,12 @@ async function calculateEfficiency(issues: JiraIssue[], worklogs: WorkLog[], sta
             nonWorkingHours: 0,
             nonIssueHours: 0
         });
-    });
 
-    logger.log(`\nEindresultaat efficiëntie berekening:`);
-    efficiencyData.forEach((data: EfficiencyData) => {
-        // Verwijder de logging van efficiëntie per medewerker
+        // Log de efficiëntie berekening voor deze medewerker
+        logger.log(`\nEfficiëntie berekening voor ${employeeName}:`);
+        logger.log(`- Totaal geschatte uren: ${totalEstimatedHours.toFixed(1)}`);
+        logger.log(`- Totaal gelogde uren: ${totalLoggedHours.toFixed(1)}`);
+        logger.log(`- Efficiëntie: ${efficiency.toFixed(1)}%`);
     });
 
     return efficiencyData;
@@ -1458,7 +1534,7 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
         }
 
         // Bereken en voeg de efficiëntie tabel toe
-        const efficiencyData = await calculateEfficiency(allIssues, allProjectWorklogs, parsedStartDate, parsedEndDate);
+        const efficiencyData = await calculateEfficiency(allIssues, parsedStartDate, parsedEndDate);
         const efficiencyTable = generateEfficiencyTable(efficiencyData);
         worklogsHtml += efficiencyTable;
 
