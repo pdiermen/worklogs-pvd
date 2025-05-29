@@ -1441,40 +1441,74 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
         const totalWorklogsTable = generateTotalWorklogsTableFromData(totalHoursByEmployeeAndCategory);
         worklogsHtml += totalWorklogsTable;
 
-        res.send(`
-            <!DOCTYPE html>
-            <html>
-                <head>
-                    <title>Worklogs</title>
-                    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
-                    <style>
-                        .project-section {
-                            margin-bottom: 2rem;
-                        }
-                        table {
-                            margin-bottom: 1rem;
-                        }
-                        th, td {
-                            text-align: right;
-                        }
-                        th:first-child, td:first-child {
-                            text-align: left;
-                        }
-                    </style>
-                </head>
-                <body>
-                    <div class="container mt-4">
-                        <h2>Worklogs</h2>
-                        ${worklogsHtml}
-                    </div>
-                </body>
-            </html>
-        `);
+        // Verzamel alle issues per project voor efficiëntie berekening
+        const allIssues: JiraIssue[] = [];
+        for (const projectConfig of projectConfigs) {
+            // Bouw de JQL query met de juiste filters
+            const projectFilter = `project in (${projectConfig.projectCodes.map(code => `"${code}"`).join(', ')})`;
+            const jql = `${projectFilter} AND resolutiondate >= "${parsedStartDate.toISOString().split('T')[0]}" AND resolutiondate <= "${parsedEndDate.toISOString().split('T')[0]}" AND status = Closed ORDER BY resolutiondate DESC`;
+            
+            logger.log(`\n=== JQL Query voor efficiëntie berekening ===`);
+            logger.log(`Project: ${projectConfig.projectName}`);
+            logger.log(`JQL: ${jql}`);
+            
+            const issues = await getIssues(jql);
+            const jiraIssues = convertIssuesToJiraIssues(issues);
+            allIssues.push(...jiraIssues);
+        }
+
+        // Bereken en voeg de efficiëntie tabel toe
+        const efficiencyData = await calculateEfficiency(allIssues, allProjectWorklogs, parsedStartDate, parsedEndDate);
+        const efficiencyTable = generateEfficiencyTable(efficiencyData);
+        worklogsHtml += efficiencyTable;
+
+        res.send(worklogsHtml);
     } catch (error) {
         logger.error(`Error bij ophalen van worklogs: ${error}`);
         res.status(500).json({ error: 'Er is een fout opgetreden bij het ophalen van de worklogs' });
     }
 });
+
+function generateEfficiencyTable(efficiencyData: EfficiencyData[]): string {
+    let html = `
+        <div class="row mt-4">
+            <div class="col-md-12">
+                <h4>Efficiëntie Overzicht</h4>
+                <table class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th>Medewerker</th>
+                            <th>Geschatte uren</th>
+                            <th>Gelogde uren</th>
+                            <th>Efficiëntie</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+    `;
+
+    // Sorteer op efficiëntie (hoog naar laag)
+    const sortedData = [...efficiencyData].sort((a, b) => b.efficiency - a.efficiency);
+
+    sortedData.forEach(data => {
+        html += `
+            <tr>
+                <td>${data.employee}</td>
+                <td>${data.estimatedHours?.toFixed(1) || '0.0'}</td>
+                <td>${data.loggedHours?.toFixed(1) || '0.0'}</td>
+                <td>${data.efficiency.toFixed(1)}%</td>
+            </tr>
+        `;
+    });
+
+    html += `
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    `;
+
+    return html;
+}
 
 function generateHtml(
     projectIssues: Record<string, JiraIssue[]>,
