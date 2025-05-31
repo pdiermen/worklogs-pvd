@@ -219,7 +219,7 @@ interface IssueHistory {
     }[];
 }
 
-async function calculateEfficiency(issues: JiraIssue[], startDate: Date, endDate: Date): Promise<EfficiencyData[]> {
+async function calculateEfficiency(issues: JiraIssue[], startDate: Date, endDate: Date): Promise<{ normal: EfficiencyData[], pure: EfficiencyData[] }> {
     logger.log('Start calculateEfficiency functie');
     
     // Haal project configuraties op uit Google Sheet
@@ -350,6 +350,31 @@ async function calculateEfficiency(issues: JiraIssue[], startDate: Date, endDate
 
     // Bereken efficiëntie per medewerker
     const efficiencyData: EfficiencyData[] = [];
+    const pureEfficiencyData: EfficiencyData[] = [];
+
+    // Identificeer issues met meerdere medewerkers
+    const issuesWithMultipleEmployees = new Set<string>();
+    const issueWorklogs = new Map<string, Set<string>>();
+
+    allWorklogs.forEach(log => {
+        const employeeName = typeof log.author === 'string' ? 
+            log.author : 
+            (log.author && typeof log.author === 'object' && 'displayName' in log.author ? 
+                log.author.displayName : 
+                'Onbekend');
+        
+        if (!issueWorklogs.has(log.issueKey)) {
+            issueWorklogs.set(log.issueKey, new Set());
+        }
+        issueWorklogs.get(log.issueKey)?.add(employeeName);
+    });
+
+    issueWorklogs.forEach((employees, issueKey) => {
+        if (employees.size > 1) {
+            issuesWithMultipleEmployees.add(issueKey);
+        }
+    });
+
     worklogsByEmployee.forEach((employeeWorklogs, employeeName) => {
         // Filter issues voor deze medewerker
         const employeeIssues = allClosedIssues.filter((issue: any) => 
@@ -397,6 +422,7 @@ async function calculateEfficiency(issues: JiraIssue[], startDate: Date, endDate
         // Bereken efficiëntie
         const efficiency = totalEstimatedHours > 0 ? (totalLoggedHours / totalEstimatedHours) * 100 : 0;
 
+        // Voeg toe aan normale efficiëntie data
         efficiencyData.push({
             employee: employeeName,
             estimatedHours: Number(totalEstimatedHours.toFixed(1)),
@@ -408,14 +434,33 @@ async function calculateEfficiency(issues: JiraIssue[], startDate: Date, endDate
             numberOfIssues: employeeIssues.length
         });
 
-        // Log de efficiëntie berekening voor deze medewerker
-        logger.log(`\nEfficiëntie berekening voor ${employeeName}:`);
-        logger.log(`- Totaal geschatte uren: ${totalEstimatedHours.toFixed(1)}`);
-        logger.log(`- Totaal gelogde uren: ${totalLoggedHours.toFixed(1)}`);
-        logger.log(`- Efficiëntie: ${efficiency.toFixed(1)}%`);
+        // Bereken zuivere efficiëntie
+        const pureIssues = employeeIssues.filter(issue => !issuesWithMultipleEmployees.has(issue.key));
+        const pureEstimatedHours = pureIssues.reduce((total, issue) => 
+            total + (issue.fields?.timeoriginalestimate ? issue.fields.timeoriginalestimate / 3600 : 0), 0);
+        const pureLoggedHours = pureIssues.reduce((total, issue) => {
+            const issueWorklogs = employeeWorklogs.filter(log => log.issueKey === issue.key);
+            return total + issueWorklogs.reduce((sum, log) => sum + log.timeSpentSeconds / 3600, 0);
+        }, 0);
+        const pureEfficiency = pureEstimatedHours > 0 ? (pureLoggedHours / pureEstimatedHours) * 100 : 0;
+
+        // Voeg toe aan zuivere efficiëntie data
+        pureEfficiencyData.push({
+            employee: employeeName,
+            estimatedHours: Number(pureEstimatedHours.toFixed(1)),
+            loggedHours: Number(pureLoggedHours.toFixed(1)),
+            efficiency: Number(pureEfficiency.toFixed(1)),
+            totalHours: 0,
+            nonWorkingHours: 0,
+            nonIssueHours: 0,
+            numberOfIssues: pureIssues.length
+        });
     });
 
-    return efficiencyData;
+    return {
+        normal: efficiencyData,
+        pure: pureEfficiencyData
+    };
 }
 
 app.get('/worklogs', (req, res) => {
@@ -1536,7 +1581,7 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
     }
 });
 
-function generateEfficiencyTable(efficiencyData: EfficiencyData[]): string {
+function generateEfficiencyTable(efficiencyData: { normal: EfficiencyData[], pure: EfficiencyData[] }): string {
     let html = `
         <div class="row mt-4">
             <div class="col-md-12">
@@ -1555,9 +1600,46 @@ function generateEfficiencyTable(efficiencyData: EfficiencyData[]): string {
     `;
 
     // Sorteer op efficiëntie (hoog naar laag)
-    const sortedData = [...efficiencyData].sort((a, b) => b.efficiency - a.efficiency);
+    const sortedData = [...efficiencyData.normal].sort((a, b) => b.efficiency - a.efficiency);
 
     sortedData.forEach(data => {
+        html += `
+            <tr>
+                <td>${data.employee}</td>
+                <td>${data.estimatedHours?.toFixed(1) || '0.0'}</td>
+                <td>${data.loggedHours?.toFixed(1) || '0.0'}</td>
+                <td>${data.numberOfIssues}</td>
+                <td>${data.efficiency.toFixed(1)}%</td>
+            </tr>
+        `;
+    });
+
+    html += `
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="row mt-4">
+            <div class="col-md-12">
+                <h4>Efficiëntie Overzicht (Zuiver)</h4>
+                <table class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th>Medewerker</th>
+                            <th>Geschatte uren</th>
+                            <th>Gelogde uren</th>
+                            <th>Aantal issues</th>
+                            <th>Efficiëntie</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+    `;
+
+    // Sorteer op efficiëntie (hoog naar laag)
+    const sortedPureData = [...efficiencyData.pure].sort((a, b) => b.efficiency - a.efficiency);
+
+    sortedPureData.forEach(data => {
         html += `
             <tr>
                 <td>${data.employee}</td>
