@@ -134,11 +134,8 @@ app.get('/', async (req, res) => {
             </head>
             <body>
                 <nav class="navbar">
-                    <a href="/" class="navbar-brand">Planning Dashboard</a>
+                    <a href="/" class="navbar-brand">Worklogs Dashboard</a>
                     <ul class="navbar-nav">
-                        <li class="nav-item">
-                            <a href="/" class="nav-link active">Planning</a>
-                        </li>
                         <li class="nav-item">
                             <a href="/worklogs" class="nav-link">Worklogs & Efficiëntie</a>
                         </li>
@@ -407,7 +404,8 @@ async function calculateEfficiency(issues: JiraIssue[], startDate: Date, endDate
             efficiency: Number(efficiency.toFixed(1)),
             totalHours: 0,
             nonWorkingHours: 0,
-            nonIssueHours: 0
+            nonIssueHours: 0,
+            numberOfIssues: employeeIssues.length
         });
 
         // Log de efficiëntie berekening voor deze medewerker
@@ -434,11 +432,8 @@ app.get('/worklogs', (req, res) => {
         </head>
         <body>
             <nav class="navbar">
-                <a href="/" class="navbar-brand">Planning Dashboard</a>
+                <a href="/" class="navbar-brand">Worklogs Dashboard</a>
                 <ul class="navbar-nav">
-                    <li class="nav-item">
-                        <a href="/" class="nav-link">Planning</a>
-                    </li>
                     <li class="nav-item">
                         <a href="/worklogs" class="nav-link active">Worklogs & Efficiëntie</a>
                     </li>
@@ -896,7 +891,6 @@ function generatePlanningTable(planning: PlanningResult, sprintNames: Map<string
                     <h2 class="mb-0">Planning</h2>
                     <div class="btn-group">
                         <a href="/worklogs" class="btn btn-outline-primary">Worklogs</a>
-                        <a href="/planning" class="btn btn-primary">Planning</a>
                     </div>
                 </div>
             </div>
@@ -1003,11 +997,8 @@ app.get('/planning', async (req, res) => {
             </head>
             <body>
                 <nav class="navbar">
-                    <a href="/" class="navbar-brand">Planning Dashboard</a>
+                    <a href="/" class="navbar-brand">Worklogs Dashboard</a>
                     <ul class="navbar-nav">
-                        <li class="nav-item">
-                            <a href="/" class="nav-link active">Planning</a>
-                        </li>
                         <li class="nav-item">
                             <a href="/worklogs" class="nav-link">Worklogs & Efficiëntie</a>
                         </li>
@@ -1556,6 +1547,7 @@ function generateEfficiencyTable(efficiencyData: EfficiencyData[]): string {
                             <th>Medewerker</th>
                             <th>Geschatte uren</th>
                             <th>Gelogde uren</th>
+                            <th>Aantal issues</th>
                             <th>Efficiëntie</th>
                         </tr>
                     </thead>
@@ -1571,6 +1563,7 @@ function generateEfficiencyTable(efficiencyData: EfficiencyData[]): string {
                 <td>${data.employee}</td>
                 <td>${data.estimatedHours?.toFixed(1) || '0.0'}</td>
                 <td>${data.loggedHours?.toFixed(1) || '0.0'}</td>
+                <td>${data.numberOfIssues}</td>
                 <td>${data.efficiency.toFixed(1)}%</td>
             </tr>
         `;

@@ -85,13 +85,13 @@ export interface WorkLog {
 
 export interface EfficiencyData {
     employee: string;
+    estimatedHours?: number;
+    loggedHours?: number;
+    efficiency: number;
     totalHours: number;
     nonWorkingHours: number;
     nonIssueHours: number;
-    efficiency: number;
-    assignee?: string;
-    estimatedHours?: number;
-    loggedHours?: number;
+    numberOfIssues: number;
 }
 
 export interface EfficiencyTable {
