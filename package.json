@@ -1,7 +1,7 @@
 {
   "name": "planning-pvd",
   "version": "1.0.0",
-  "description": "Planning dashboard voor PvD",
+  "description": "Worklogs dashboard voor PvD",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",

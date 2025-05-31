@@ -473,9 +473,78 @@ app.get('/worklogs', (req, res) => {
             <title>Worklogs & Efficiëntie Dashboard</title>
             <style>
                 ${styles}
+                .loading-overlay {
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    width: 100%;
+                    height: 100%;
+                    background: rgba(0, 0, 0, 0.8);
+                    display: none;
+                    justify-content: center;
+                    align-items: center;
+                    z-index: 9999;
+                }
+                .loading-content {
+                    text-align: center;
+                    background: white;
+                    padding: 40px;
+                    border-radius: 15px;
+                    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+                    min-width: 350px;
+                    position: relative;
+                }
+                .loading-spinner {
+                    width: 80px;
+                    height: 80px;
+                    border: 8px solid #e0e0e0;
+                    border-top: 8px solid #007bff;
+                    border-radius: 50%;
+                    animation: spin 1s linear infinite;
+                    margin: 0 auto 25px;
+                }
+                .loading-message {
+                    color: #333;
+                    font-size: 20px;
+                    font-weight: bold;
+                    margin-top: 20px;
+                    text-align: center;
+                }
+                .loading-progress {
+                    width: 100%;
+                    height: 4px;
+                    background: #e0e0e0;
+                    margin-top: 20px;
+                    border-radius: 2px;
+                    overflow: hidden;
+                }
+                .loading-progress-bar {
+                    width: 0%;
+                    height: 100%;
+                    background: #007bff;
+                    animation: progress 2s ease-in-out infinite;
+                }
+                @keyframes spin {
+                    0% { transform: rotate(0deg); }
+                    100% { transform: rotate(360deg); }
+                }
+                @keyframes progress {
+                    0% { width: 0%; }
+                    50% { width: 100%; }
+                    100% { width: 0%; }
+                }
             </style>
         </head>
         <body>
+            <div id="loadingOverlay" class="loading-overlay">
+                <div class="loading-content">
+                    <div class="loading-spinner"></div>
+                    <div id="loadingMessage" class="loading-message">Worklogs worden opgehaald...</div>
+                    <div class="loading-progress">
+                        <div class="loading-progress-bar"></div>
+                    </div>
+                </div>
+            </div>
             <nav class="navbar">
                 <a href="/" class="navbar-brand">Worklogs Dashboard</a>
                 <ul class="navbar-nav">
@@ -524,21 +593,50 @@ app.get('/worklogs', (req, res) => {
                         return;
                     }
 
+                    const loadingOverlay = document.getElementById('loadingOverlay');
+                    const loadingMessage = document.getElementById('loadingMessage');
+                    const worklogsContainer = document.getElementById('worklogsContainer');
+                    
+                    // Toon de loading indicator
+                    loadingOverlay.style.display = 'flex';
+                    loadingMessage.textContent = 'Worklogs worden opgehaald...';
+                    worklogsContainer.innerHTML = ''; // Leeg de container tijdens het laden
+
+                    // Voeg een kleine vertraging toe om de loading indicator te tonen
+                    await new Promise(resolve => setTimeout(resolve, 100));
+
                     try {
                         const response = await fetch(\`/api/worklogs?startDate=\${startDate}&endDate=\${endDate}\`);
                         if (!response.ok) {
                             throw new Error('Er is een fout opgetreden bij het ophalen van de worklogs.');
                         }
-                        const html = await response.text();
-                        document.getElementById('worklogsContainer').innerHTML = html;
+                        const data = await response.json();
+                        
+                        // Voeg een kleine vertraging toe voordat we de content tonen
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                        
+                        worklogsContainer.innerHTML = data.html;
                     } catch (error) {
-                        document.getElementById('worklogsContainer').innerHTML = \`
+                        console.error('Error:', error);
+                        worklogsContainer.innerHTML = \`
                             <div class="alert alert-danger">
                                 Er is een fout opgetreden bij het ophalen van de worklogs.
                             </div>
                         \`;
+                    } finally {
+                        // Wacht even voordat we de loading indicator verbergen
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                        loadingOverlay.style.display = 'none';
                     }
                 }
+
+                // Voeg event listeners toe voor de loading indicator
+                document.addEventListener('DOMContentLoaded', () => {
+                    const loadingOverlay = document.getElementById('loadingOverlay');
+                    if (loadingOverlay) {
+                        loadingOverlay.style.display = 'none';
+                    }
+                });
             </script>
         </body>
         </html>
@@ -1574,7 +1672,7 @@ app.get('/api/worklogs', async (req: Request, res: Response) => {
         const efficiencyTable = generateEfficiencyTable(efficiencyData);
         worklogsHtml += efficiencyTable;
 
-        res.send(worklogsHtml);
+        res.json({ html: worklogsHtml });
     } catch (error) {
         logger.error(`Error bij ophalen van worklogs: ${error}`);
         res.status(500).json({ error: 'Er is een fout opgetreden bij het ophalen van de worklogs' });
