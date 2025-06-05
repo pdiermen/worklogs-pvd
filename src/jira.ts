@@ -238,10 +238,16 @@ export async function getWorkLogs(projectKey: string, startDate: string, endDate
                     }
                     
                     for (const log of allIssueWorklogs) {
-                        const logDate = new Date(log.started).toISOString().split('T')[0];
-                        const start = new Date(startDate).toISOString().split('T')[0];
-                        const end = new Date(endDate).toISOString().split('T')[0];
+                        // Converteer de UTC tijd naar Nederlandse tijdzone voor vergelijking
+                        const logDate = new Date(log.started);
+                        const start = new Date(startDate);
+                        const end = new Date(endDate);
                         
+                        // Zet de tijden op middernacht in Nederlandse tijdzone
+                        start.setHours(0, 0, 0, 0);
+                        end.setHours(23, 59, 59, 999);
+                        
+                        // Vergelijk de datums in Nederlandse tijdzone
                         if (logDate >= start && logDate <= end) {
                             worklogs.push({
                                 issueKey: issue.key,
@@ -628,9 +634,15 @@ export async function getWorkLogsForProject(
                 if (allIssueWorklogs.length > 0) {
                     // Filter worklogs op basis van de datum
                     const filteredWorklogs = allIssueWorklogs.filter((log: JiraWorkLog) => {
-                        const logDate = new Date(log.started).toISOString().split('T')[0];
-                        const start = startDate.toISOString().split('T')[0];
-                        const end = endDate.toISOString().split('T')[0];
+                        const logDate = new Date(log.started);
+                        const start = new Date(startDate);
+                        const end = new Date(endDate);
+                        
+                        // Zet de tijden op middernacht in Nederlandse tijdzone
+                        start.setHours(0, 0, 0, 0);
+                        end.setHours(23, 59, 59, 999);
+                        
+                        // Vergelijk de datums in Nederlandse tijdzone
                         return logDate >= start && logDate <= end;
                     });
 
@@ -676,7 +688,7 @@ export async function getWorkLogsForProject(
     }
 }
 
-export async function getWorklogsForIssues(issues: Issue[]): Promise<WorkLog[]> {
+export async function getWorklogsForIssues(issues: Issue[], startDate: Date, endDate: Date): Promise<WorkLog[]> {
     try {
         const issueKeys = issues.map(issue => issue.key);
         const worklogIssuesJql = `key in (${issueKeys.join(',')})`;
@@ -746,17 +758,29 @@ export async function getWorklogsForIssues(issues: Issue[]): Promise<WorkLog[]> 
                     logger.log(`Issue ${issue.key}: ${allIssueWorklogs.length} worklogs gevonden`);
                     
                     for (const log of allIssueWorklogs) {
-                        worklogs.push({
-                            issueKey: issue.key,
-                            issueSummary: issue.fields.summary,
-                            issueStatus: issue.fields.status.name,
-                            issueAssignee: issue.fields.assignee?.displayName || 'Onbekend',
-                            issuePriority: issue.fields.priority?.name || 'Lowest',
-                            author: typeof log.author === 'string' ? log.author : log.author.displayName,
-                            timeSpentSeconds: log.timeSpentSeconds,
-                            started: log.started,
-                            comment: log.comment
-                        });
+                        // Converteer de UTC tijd naar Nederlandse tijdzone voor vergelijking
+                        const logDate = new Date(log.started);
+                        const start = new Date(startDate);
+                        const end = new Date(endDate);
+                        
+                        // Zet de tijden op middernacht in Nederlandse tijdzone
+                        start.setHours(0, 0, 0, 0);
+                        end.setHours(23, 59, 59, 999);
+                        
+                        // Vergelijk de datums in Nederlandse tijdzone
+                        if (logDate >= start && logDate <= end) {
+                            worklogs.push({
+                                issueKey: issue.key,
+                                issueSummary: issue.fields.summary,
+                                issueStatus: issue.fields.status.name,
+                                issueAssignee: issue.fields.assignee?.displayName || 'Onbekend',
+                                issuePriority: issue.fields.priority?.name || 'Lowest',
+                                author: typeof log.author === 'string' ? log.author : log.author.displayName,
+                                timeSpentSeconds: log.timeSpentSeconds,
+                                started: log.started,
+                                comment: log.comment
+                            });
+                        }
                     }
                 } catch (error) {
                     logger.error(`Error bij ophalen worklogs voor issue ${issue.key}: ${error}`);
